@@ -5,6 +5,8 @@ WiFi Access Point service for Stonepi, with WARP coexistence.
 ## Files
 
 - `opt/stonepi/start-ap.sh` – brings up hostapd + dnsmasq
+- `opt/stonepi/stop-ap.sh` – stops AP and restores WiFi client mode
+- `opt/stonepi/toggle-ap.sh` – CLI to toggle AP mode on/off
 - `opt/stonepi/cleanup-warp.sh` – nftables rules to coexist with Cloudflare WARP
 - `opt/stonepi/detect-iface.sh` – detects AP interface by name, MAC, or fallback
 - `etc/hostapd/hostapd-stonepi.conf` – hostapd config (SSID: `stonepi`, WPA2-PSK)
@@ -32,6 +34,25 @@ WiFi Access Point service for Stonepi, with WARP coexistence.
    sudo systemctl status stonepi-ap
    tail -f /var/log/stonepi-ap.log /var/log/stonepi-cleanup.log
    ```
+
+## CLI Toggle Tool
+
+Use `toggle-ap.sh` to switch between AP mode and normal WiFi client mode:
+
+```bash
+sudo /opt/stonepi/toggle-ap.sh start    # Activar modo AP
+sudo /opt/stonepi/toggle-ap.sh stop     # Detener AP, restaurar WiFi cliente
+sudo /opt/stonepi/toggle-ap.sh restart  # Reiniciar AP
+sudo /opt/stonepi/toggle-ap.sh status   # Ver estado actual
+sudo /opt/stonepi/toggle-ap.sh enable   # Habilitar inicio automatico
+sudo /opt/stonepi/toggle-ap.sh disable  # Deshabilitar y detener AP
+```
+
+Shortcuts (equivalent):
+```bash
+sudo /opt/stonepi/start-ap.sh           # Iniciar AP (legacy)
+sudo /opt/stonepi/stop-ap.sh            # Detener AP (nuevo)
+```
 
 ## Dependencies
 
