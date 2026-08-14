@@ -20,6 +20,9 @@ import shutil
 import time
 import re
 
+# --- Version ---
+VERSION = "1.0.0"
+
 # --- Paths ---
 CONFIG_DIR = "/etc/escama"
 ENV_FILE = os.path.join(CONFIG_DIR, "escama.env")
@@ -301,10 +304,28 @@ def do_status() -> int:
 
 def main(args: list = None) -> int:
     if os.geteuid() != 0:
-        print("Este script necesita sudo. Ejecutalo con: sudo escama.py ...", file=sys.stderr)
+        print("Este script necesita sudo. Ejecutalo con: sudo escama ...", file=sys.stderr)
         return 1
     argv = args if args is not None else sys.argv[1:]
     action = argv[0] if len(argv) > 0 else "status"
+
+    # global flags
+    if action in ("--help", "-h", "help"):
+        print(__doc__.strip())
+        print("\nUso: sudo escama {start|stop|restart|status|reconnect|genconfig|edit}")
+        print("  start      Levanta el AP (hostapd + dnsmasq + masquerade)")
+        print("  stop       Baja el AP, restaura iface a cliente")
+        print("  restart    stop + start")
+        print("  status     Estado actual")
+        print("  reconnect  Reconexion manual tras plug/unplug")
+        print("  genconfig Regenera hostapd/dnsmasq desde escama.env")
+        print("  edit       Abre escama.env en $EDITOR (nvim por defecto)")
+        print("\nOpciones: --help|-h  --version|-v")
+        return 0
+    if action in ("--version", "-v", "version"):
+        print(f"escama {VERSION}")
+        return 0
+
     if action == "start":
         return do_start()
     elif action == "stop":
@@ -328,9 +349,13 @@ def main(args: list = None) -> int:
         generate_configs(load_env())
         log("Configs generados.")
         return 0
+    elif action == "edit":
+        editor = os.environ.get("EDITOR", "nvim")
+        os.execvp(editor, [editor, ENV_FILE])
+        return 0  # unreachable
     else:
         print(f"Accion desconocida: {action}", file=sys.stderr)
-        print("Uso: escama.py {start|stop|restart|status|reconnect|genconfig}", file=sys.stderr)
+        print("Uso: sudo escama {start|stop|restart|status|reconnect|genconfig|edit}", file=sys.stderr)
         return 2
 
 
