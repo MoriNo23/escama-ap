@@ -85,10 +85,19 @@ wn8200nd sea cliente con internet.)
 
 ```bash
 cd escama-ap
-PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 9 tests
+PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 15 tests
 python3 -m mutmut run                                         # mutation testing
 ```
-Los tests mockean `run()`/`subprocess`/`os`, así que **nunca tocan stonepi ni wn8200nd**.
+Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.
+
+### Mutation testing (mutmut)
+- 1ª suite (9 tests): 772 mutantes, ~19% killed → reveló funciones sin cubrir
+  (`do_stop`, `do_status`, `wan_has_internet`, `main`).
+- 2ª suite (15 tests): 775 mutantes, **264 killed / 158 survived ≈ 62.6%**
+  (excluyendo 353 timeouts por el `sleep` de start/stop, que son ruido de la técnica).
+- Supervivientes restantes: en `log()` (formato de string, no crítico) y `load_env()`
+  (parsing edge cases). `run()` es el boundary mockeado, no cuenta como superviviente
+  de diseño.
 
 ## Requisitos
 
