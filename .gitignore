@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# mutmut cache
+mutants/
+
+# local logs
+/var/log/escama-*.log
