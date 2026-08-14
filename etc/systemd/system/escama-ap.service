@@ -1,0 +1,18 @@
+[Unit]
+Description=escama AP - hostapd + dnsmasq
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStartPre=/opt/escama/detect-iface.sh ap
+ExecStartPre=+/bin/bash -c 'nmcli device set $(/opt/escama/detect-iface.sh ap) managed no'
+ExecStart=/opt/escama/start-ap.sh
+ExecStartPost=/opt/escama/cleanup-warp.sh
+ExecStop=/bin/sh -c 'killall hostapd 2>/dev/null; killall dnsmasq 2>/dev/null; sleep 1; /opt/escama/toggle-ap.sh stop'
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

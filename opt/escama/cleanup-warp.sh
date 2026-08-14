@@ -1,11 +1,21 @@
 #!/bin/bash
 # cleanup-warp.sh - Bypass quirúrgico para que AP + WARP coexistan
 # NO mata túnel WARP, agrega reglas a SU tabla cuando existe
-LOG="/var/log/stonepi-cleanup.log"
-IFACE_INTERNET="${IFACE_WAN:-$(/opt/stonepi/detect-iface.sh wan)}"
-IFACE_AP="$(/opt/stonepi/detect-iface.sh ap)"
-AP_SUBNET="10.42.1.0/24"
-AP_IP="10.42.1.1"
+#
+# AP interface = designated access point (escama, default wn8200nd).
+# WAN interface = internet WiFi, keeps name "stonepi".
+
+CONFIG_FILE="/etc/escama/escama.env"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
+
+LOG="/var/log/escama-cleanup.log"
+IFACE_INTERNET="${WAN_IFACE:-$(/opt/escama/detect-iface.sh wan)}"
+IFACE_AP="$(/opt/escama/detect-iface.sh ap)"
+AP_SUBNET="${AP_SUBNET:-10.42.1.0/24}"
+AP_IP="${AP_IP:-10.42.1.1}"
 
 echo "$(date): Iniciando cleanup quirúrgico (AP: $IFACE_AP, WAN: $IFACE_INTERNET)" >> "$LOG"
 
@@ -22,19 +32,19 @@ if nft list tables 2>/dev/null | grep -q "inet cloudflare-warp"; then
         echo "    + ACCEPT rules agregadas a cloudflare-warp forward"
     fi
 else
-    echo "  ~ WARP inactivo: usando tabla own stonepi-ap"
-    if ! nft list tables 2>/dev/null | grep -q "inet stonepi-ap"; then
-        nft add table inet stonepi-ap
-        nft add chain inet stonepi-ap forward '{ type filter hook forward priority -1; policy accept; }'
-        nft add rule inet stonepi-ap forward iifname "$IFACE_AP" oifname "$IFACE_INTERNET" accept
-        nft add rule inet stonepi-ap forward iifname "$IFACE_INTERNET" oifname "$IFACE_AP" ct state related,established accept
-        echo "    + tabla inet stonepi-ap creada (forward)"
+    echo "  ~ WARP inactivo: usando tabla own escama-ap"
+    if ! nft list tables 2>/dev/null | grep -q "inet escama-ap"; then
+        nft add table inet escama-ap
+        nft add chain inet escama-ap forward '{ type filter hook forward priority -1; policy accept; }'
+        nft add rule inet escama-ap forward iifname "$IFACE_AP" oifname "$IFACE_INTERNET" accept
+        nft add rule inet escama-ap forward iifname "$IFACE_INTERNET" oifname "$IFACE_AP" ct state related,established accept
+        echo "    + tabla inet escama-ap creada (forward)"
     fi
 fi
 
-if ! nft list table inet stonepi-ap 2>/dev/null | grep -q "masquerade"; then
-    nft add chain inet stonepi-ap postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null
-    nft add rule inet stonepi-ap postrouting ip saddr "$AP_SUBNET" oifname "$IFACE_INTERNET" masquerade 2>/dev/null
+if ! nft list table inet escama-ap 2>/dev/null | grep -q "masquerade"; then
+    nft add chain inet escama-ap postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null
+    nft add rule inet escama-ap postrouting ip saddr "$AP_SUBNET" oifname "$IFACE_INTERNET" masquerade 2>/dev/null
     echo "    + MASQUERADE nft nativa agregada"
 fi
 
