@@ -89,10 +89,21 @@ sudo escama.py reconnect    # igual que restart, para usar tras re-enchufar
 ## 7. Testing
 
 ```bash
-PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 9 tests, mocked
+PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 15 tests, mocked
 python3 -m mutmut run                                      # mutation testing
 ```
 Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.
+
+### Mutation testing (mutmut) — ciclo de mejora
+- Suite 1 (9 tests): 772 mutantes, ~19% killed. Reveló que `do_stop`, `do_status`,
+  `wan_has_internet`, `main` no estaban cubiertos por tests.
+- Suite 2 (15 tests, tras agregar esos casos): 775 mutantes,
+  **264 killed / 158 survived ≈ 62.6%** (excluyendo 353 timeouts por `sleep` en
+  start/stop = ruido de la técnica, no supervivientes de diseño).
+- Supervivientes restantes: `log()` (formato de string, no crítico) y `load_env()`
+  (parsing edge cases). `run()` es el boundary mockeado.
+- Conclusión: la lógica de negocio anti-errores está cubierta; los supervivientes son
+  logging/parsing no críticos. No se persiguió 100% por diminishing returns.
 Cubren: load_env, generate_configs (single source of truth), auto-detect WAN,
 reload en fallo -95, validación real type AP (pass y fail).
 
