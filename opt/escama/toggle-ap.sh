@@ -1,13 +1,19 @@
 #!/bin/bash
-# toggle-ap.sh - CLI para activar/desactivar modo AP en stonepi
+# toggle-ap.sh - CLI para activar/desactivar modo AP en escama
 # Uso: sudo toggle-ap.sh {start|stop|restart|status|enable|disable}
 
+CONFIG_FILE="/etc/escama/escama.env"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
+
 ACTION="${1:-status}"
-LOG="/var/log/stonepi-ap.log"
-IFACE_AP="$(/opt/stonepi/detect-iface.sh ap)"
-AP_IP="10.42.1.1"
-AP_SUBNET="10.42.1.0/24"
-IFACE_WAN="${IFACE_WAN:-$(/opt/stonepi/detect-iface.sh wan)}"
+LOG="/var/log/escama-ap.log"
+IFACE_AP="$(/opt/escama/detect-iface.sh ap)"
+AP_IP="${AP_IP:-10.42.1.1}"
+AP_SUBNET="${AP_SUBNET:-10.42.1.0/24}"
+IFACE_WAN="${WAN_IFACE:-$(/opt/escama/detect-iface.sh wan)}"
 
 sudo() { command sudo "$@"; }
 
@@ -17,8 +23,8 @@ is_ap_active() {
 }
 
 do_start() {
-    echo "==> Activando modo AP en $IFACE_AP..."
-    sudo systemctl start stonepi-ap.service
+    echo "==> Activando modo AP en $IFACE_AP (escama)..."
+    sudo systemctl start escama-ap.service
     sleep 2
     if is_ap_active; then
         echo "OK: AP activo en $IFACE_AP ($AP_IP)"
@@ -29,7 +35,7 @@ do_start() {
 }
 
 do_stop() {
-    echo "==> Deteniendo modo AP en $IFACE_AP..."
+    echo "==> Deteniendo modo AP en $IFACE_AP (escama)..."
 
     echo "  Matando hostapd..."
     sudo killall hostapd 2>/dev/null
@@ -40,7 +46,7 @@ do_stop() {
     sudo killall dnsmasq 2>/dev/null
     sleep 1
     sudo killall -9 dnsmasq 2>/dev/null
-    sudo rm -f /run/dnsmasq-stonepi.pid
+    sudo rm -f /run/dnsmasq-escama.pid
 
     echo "  Eliminando IP $AP_IP de $IFACE_AP..."
     sudo ip addr del "${AP_IP}/24" dev "$IFACE_AP" 2>/dev/null
@@ -48,8 +54,8 @@ do_stop() {
     echo "  Restaurando NM managed=yes..."
     sudo nmcli device set "$IFACE_AP" managed yes
 
-    echo "  Limpiando nftables stonepi-ap..."
-    sudo nft delete table inet stonepi-ap 2>/dev/null
+    echo "  Limpiando nftables escama-ap..."
+    sudo nft delete table inet escama-ap 2>/dev/null
 
     echo "  Limpiando iptables FORWARD..."
     sudo iptables -D FORWARD -i "$IFACE_AP" -o "$IFACE_WAN" -j ACCEPT 2>/dev/null
@@ -75,7 +81,7 @@ $(date '+%H:%M:%S') === AP detenido - $IFACE_AP restaurado a modo cliente ===
 EOF
 
     echo "OK: AP detenido. $IFACE_AP esta en modo cliente (NM gestionado)."
-    echo "Para conectar a una red: nmcli device connect stonepi"
+    echo "Para conectar a una red: nmcli device connect $IFACE_AP"
 }
 
 do_restart() {
@@ -85,7 +91,7 @@ do_restart() {
 }
 
 do_status() {
-    echo "=== stonepi AP Status ==="
+    echo "=== escama AP Status ==="
     echo "Interface AP: $IFACE_AP"
     echo "Interface WAN: $IFACE_WAN"
 
@@ -97,9 +103,9 @@ do_status() {
     fi
 
     echo ""
-    echo "Servicio stonepi-ap:"
-    sudo systemctl is-active stonepi-ap.service 2>/dev/null | xargs -I{} echo "  Active: {}"
-    sudo systemctl is-enabled stonepi-ap.service 2>/dev/null | xargs -I{} echo "  Enabled: {}"
+    echo "Servicio escama-ap:"
+    sudo systemctl is-active escama-ap.service 2>/dev/null | xargs -I{} echo "  Active: {}"
+    sudo systemctl is-enabled escama-ap.service 2>/dev/null | xargs -I{} echo "  Enabled: {}"
 
     echo ""
     echo "Procesos:"
@@ -117,22 +123,17 @@ do_status() {
 }
 
 do_enable() {
-    echo "==> Habilitando stonepi-ap.service para inicio automatico..."
-    sudo systemctl enable stonepi-ap.service
-    sudo systemctl enable stonepi-cleanup.service
-    sudo systemctl enable stonepi-health.timer
-    echo "OK: Servicios habilitados"
+    echo "==> Habilitando escama-ap.service para inicio automatico..."
+    sudo systemctl enable escama-ap.service
+    echo "OK: Servicio habilitado"
 }
 
 do_disable() {
-    echo "==> Deshabilitando stonepi-ap.service..."
+    echo "==> Deshabilitando escama-ap.service..."
     do_stop
-    sudo systemctl stop stonepi-ap.service 2>/dev/null
-    sudo systemctl disable stonepi-ap.service 2>/dev/null
-    sudo systemctl disable stonepi-cleanup.service 2>/dev/null
-    sudo systemctl stop stonepi-health.timer 2>/dev/null
-    sudo systemctl disable stonepi-health.timer 2>/dev/null
-    echo "OK: Servicios deshabilitados, AP detenido"
+    sudo systemctl stop escama-ap.service 2>/dev/null
+    sudo systemctl disable escama-ap.service 2>/dev/null
+    echo "OK: Servicio deshabilitado, AP detenido"
 }
 
 case "$ACTION" in
@@ -146,7 +147,7 @@ case "$ACTION" in
         echo "Uso: toggle-ap.sh {start|stop|restart|status|enable|disable}"
         echo ""
         echo "Comandos:"
-        echo "  start    Activar modo AP en stonepi"
+        echo "  start    Activar modo AP en escama ($IFACE_AP)"
         echo "  stop     Detener AP, restaurar WiFi cliente"
         echo "  restart  Reiniciar modo AP"
         echo "  status   Mostrar estado actual (AP o cliente)"
