@@ -298,11 +298,12 @@ def do_status() -> int:
     return 0
 
 
-def main() -> int:
+def main(args: list = None) -> int:
     if os.geteuid() != 0:
         print("Este script necesita sudo. Ejecutalo con: sudo escama.py ...", file=sys.stderr)
         return 1
-    action = sys.argv[1] if len(sys.argv) > 1 else "status"
+    argv = args if args is not None else sys.argv[1:]
+    action = argv[0] if len(argv) > 0 else "status"
     if action == "start":
         return do_start()
     elif action == "stop":

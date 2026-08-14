@@ -221,3 +221,95 @@ def test_do_start_fails_when_ap_mode_not_reached(monkeypatch):
     monkeypatch.setattr(escama, "_ensure_ip", lambda *a: None)
     rc = escama.do_start()
     assert rc == 1, "do_start must FAIL if iface not in type AP (anti false-positive)"
+
+
+def test_do_stop_restores_client_mode(monkeypatch):
+    """do_stop must remove AP IP, set NM managed=yes, kill procs, disable forward."""
+    calls = []
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "_kill_procs", lambda: calls.append(["_kill_procs"]))
+    monkeypatch.setattr(escama, "load_env", lambda: {
+        "AP_IFACE": "wn8200nd", "WAN_IFACE": "stonepi", "AP_IP": "10.42.1.1",
+        "AP_CIDR": "24", "AP_SUBNET": "10.42.1.0/24"})
+    rc = escama.do_stop()
+    assert rc == 0
+    # NM managed yes on AP iface
+    assert any(c[:3] == ["nmcli", "device", "set"] and "managed" in c and "yes" in c
+               for c in calls), "do_stop must restore NM managed=yes"
+    # ip_forward disabled
+    assert any(c[:3] == ["sysctl", "-w", "net.ipv4.ip_forward=0"] for c in calls)
+    # masquerade deleted for WAN iface
+    assert any(c[:3] == ["iptables", "-t", "nat"] and "stonepi" in c for c in calls)
+
+
+def test_wan_has_internet_true(monkeypatch):
+    def fake_run(cmd, check=True, capture=True):
+        class R:
+            returncode = 0
+            if cmd[:2] == ["ip", "route"]:
+                stdout = "default via 192.168.1.1 dev stonepi\n"
+            elif cmd[:1] == ["ping"]:
+                stdout = ""
+            else:
+                stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    assert escama.wan_has_internet("stonepi") is True
+
+
+def test_wan_has_internet_false(monkeypatch):
+    def fake_run(cmd, check=True, capture=True):
+        class R:
+            returncode = 1  # ping fails
+            stdout = "default via 192.168.1.1 dev stonepi\n" if cmd[:2] == ["ip", "route"] else ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    assert escama.wan_has_internet("stonepi") is False
+
+
+def test_do_status_runs(monkeypatch, capsys):
+    def fake_run(cmd, check=True, capture=True):
+        class R:
+            returncode = 0
+            stdout = "type AP\nssid escama\n"
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "load_env", lambda: {
+        "AP_IFACE": "wn8200nd", "WAN_IFACE": "stonepi", "SSID": "escama",
+        "AP_IP": "10.42.1.1", "AP_CIDR": "24"})
+    rc = escama.do_status()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "escama AP Status" in out
+    assert "AP iface:    wn8200nd" in out
+
+
+def test_main_dispatch(monkeypatch, capsys):
+    """main() must route args to correct action and require root."""
+    # non-root -> exit 1
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    assert escama.main() == 1
+    # status as root (default action via empty args)
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(escama, "do_status", lambda: 0)
+    assert escama.main([]) == 0  # default action = status
+    monkeypatch.setattr(escama, "do_stop", lambda: 0)
+    assert escama.main(["stop"]) == 0
+    monkeypatch.setattr(escama, "do_start", lambda: 0)
+    assert escama.main(["start"]) == 0
+
+
+def test_main_unknown(monkeypatch, capsys):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    assert escama.main(["bogus"]) == 2
+
