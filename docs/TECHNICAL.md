@@ -25,7 +25,7 @@
 | `etc/hostapd/hostapd-escama.conf` | Generado desde env. No editar a mano |
 | `etc/dnsmasq-escama.conf` | Generado desde env. No editar a mano |
 | `etc/systemd/system/escama-ap.service` | Unit systemd (`ExecStart=/opt/escama/escama.py start`) |
-| `tests/test_escama.py` | 9 unit tests, mocks de system calls |
+| `tests/test_escama.py` | 19 unit tests, mocks de system calls |
 | `setup.cfg` | Config mutmut |
 
 ## 3. `escama.env` (fuente de verdad)
