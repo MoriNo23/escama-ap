@@ -313,3 +313,55 @@ def test_main_unknown(monkeypatch, capsys):
     monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
     assert escama.main(["bogus"]) == 2
 
+
+def test_log_writes_file(tmp_path, monkeypatch):
+    """log() must append the message to LOG file."""
+    logf = tmp_path / "escama-ap.log"
+    monkeypatch.setattr(escama, "LOG", str(logf))
+    escama.log("test message 123")
+    content = logf.read_text()
+    assert "test message 123" in content
+    assert content.startswith("[") or ":" in content  # has timestamp prefix
+
+
+def test_log_handles_missing_dir(tmp_path, monkeypatch):
+    """log() must not raise if the log dir is missing (graceful)."""
+    logf = tmp_path / "sub" / "escama-ap.log"
+    monkeypatch.setattr(escama, "LOG", str(logf))
+    escama.log("no crash")  # should not raise
+    assert "no crash" in logf.read_text()
+
+
+def test_load_env_parsing_edge_cases(tmp_path, monkeypatch):
+    """load_env must skip comments, blanks, handle spaces and unquoted values."""
+    env = tmp_path / "escama.env"
+    env.write_text(
+        "# comment line\n"
+        "\n"
+        "AP_IFACE = wlan5\n"          # spaces around =
+        "WAN_IFACE=eth0\n"            # unquoted
+        "SSID='my ssid'\n"            # single quotes
+        "BADLINE\n"                   # no = sign, skipped
+        "CHANNEL=11\n"
+    )
+    monkeypatch.setattr(escama, "ENV_FILE", str(env))
+    cfg = escama.load_env()
+    assert cfg["AP_IFACE"] == "wlan5"
+    assert cfg["WAN_IFACE"] == "eth0"
+    assert cfg["SSID"] == "my ssid"
+    assert cfg["CHANNEL"] == "11"
+    # defaults preserved for keys not in file
+    assert cfg["AP_IP"] == "10.42.1.1"
+
+
+def test_load_env_overrides_defaults(tmp_path, monkeypatch):
+    env = tmp_path / "escama.env"
+    env.write_text('AP_IFACE="custom"\nWAN_IFACE="wlan9"\n')
+    monkeypatch.setattr(escama, "ENV_FILE", str(env))
+    cfg = escama.load_env()
+    assert cfg["AP_IFACE"] == "custom"
+    assert cfg["WAN_IFACE"] == "wlan9"
+    # other defaults intact
+    assert cfg["SSID"] == "escama"
+
+

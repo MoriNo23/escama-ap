@@ -51,6 +51,7 @@ DEFAULTS = {
 def log(msg: str) -> None:
     line = f"{time.strftime('%H:%M:%S')} {msg}"
     try:
+        os.makedirs(os.path.dirname(LOG) or ".", exist_ok=True)
         with open(LOG, "a") as f:
             f.write(line + "\n")
     except OSError:
