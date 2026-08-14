@@ -10,6 +10,7 @@ Uso: sudo escama-tui.py
 import os
 import sys
 import subprocess
+import time
 
 ENV_FILE = "/etc/escama/escama.env"
 WHIPTAIL = shutil_whiptail = "/usr/bin/whiptail"
@@ -91,8 +92,17 @@ def whiptail_input(title, text, init):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h", "help"):
+        print("escama-tui - TUI de configuracion para escama-ap")
+        print("Uso: sudo escama-tui [--help|--version]")
+        print("  --help     Muestra esta ayuda")
+        print("  --version  Version instalada")
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v", "version"):
+        print("escama-tui 1.0.0")
+        sys.exit(0)
     if os.geteuid() != 0:
-        print("Necesita sudo: sudo escama-tui.py", file=sys.stderr)
+        print("Necesita sudo: sudo escama-tui", file=sys.stderr)
         sys.exit(1)
     cfg = load_env()
     while True:
@@ -107,10 +117,16 @@ def main():
              "6", f"Rango DHCP: {cfg['DHCP_START']}-{cfg['DHCP_END']}",
              "7", "Passphrase WPA2",
              "8", f"DNS: {cfg['DNS1']}, {cfg['DNS2']}",
+             "E", "EDITAR CONFIG (nvim)",
              "S", "GUARDAR Y SALIR"],
         )
         if choice is None or choice == "S":
             break
+        if choice == "E":
+            editor = os.environ.get("EDITOR", "nvim")
+            subprocess.run([editor, ENV_FILE], check=False)
+            cfg = load_env()  # reload after external edit
+            continue
         if choice == "1":
             ifaces = list_ifaces()
             items = [i for pair in [(x, x) for x in ifaces] for i in pair]
@@ -155,11 +171,18 @@ def main():
 
     save_env(cfg)
     # regenerar confs
-    subprocess.run(["escama.py", "genconfig"], check=False)
+    subprocess.run(["escama", "genconfig"], check=False)
+    # feedback de aplicación
+    subprocess.run(["whiptail", "--infobox", "Aplicando configuracion...", "5", "50"],
+                   check=False)
+    time.sleep(1)
+    # traer estado real para feedback
+    status = subprocess.run(["escama", "status"], capture_output=True, text=True)
     subprocess.run(["whiptail", "--msgbox",
                     f"Configuracion guardada en {ENV_FILE}\n\n"
                     f"AP={cfg['AP_IFACE']} WAN={cfg['WAN_IFACE']} SSID={cfg['SSID']}\n\n"
-                    "Para aplicar: sudo escama.py restart", 14, 70],
+                    f"Para aplicar: sudo escama restart\n\n"
+                    f"--- status ---\n{(status.stdout or '').strip()}", 20, 70],
                    check=False)
     sys.exit(0)
 
