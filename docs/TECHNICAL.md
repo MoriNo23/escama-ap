@@ -97,13 +97,17 @@ Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200n
 ### Mutation testing (mutmut) — ciclo de mejora
 - Suite 1 (9 tests): 772 mutantes, ~19% killed. Reveló que `do_stop`, `do_status`,
   `wan_has_internet`, `main` no estaban cubiertos por tests.
-- Suite 2 (15 tests, tras agregar esos casos): 775 mutantes,
-  **264 killed / 158 survived ≈ 62.6%** (excluyendo 353 timeouts por `sleep` en
-  start/stop = ruido de la técnica, no supervivientes de diseño).
-- Supervivientes restantes: `log()` (formato de string, no crítico) y `load_env()`
-  (parsing edge cases). `run()` es el boundary mockeado.
-- Conclusión: la lógica de negocio anti-errores está cubierta; los supervivientes son
-  logging/parsing no críticos. No se persiguió 100% por diminishing returns.
+- Suite 2 (15 tests): 775 mutantes, 264 killed / 158 survived ≈ 62.6%.
+- Suite 3 (19 tests, tras agregar log()/load_env()): 783 mutantes,
+  **279 killed / 158 survived ≈ 63.8%**.
+- Los 158 supervivientes restantes están en `load_env()` (parsing de .env de 15 líneas,
+  ramas no ejercitadas por los inputs de test) y `log()` (formato de string). `run()` es
+  el boundary mockeado y no cuenta como superviviente de diseño. Los ~346 🙁 son timeouts
+  por el `sleep` de start/stop (ruido de la técnica, no supervivientes reales).
+- Conclusión: TODA la lógica anti-errores crítica está cubierta (validación type AP,
+  masquerade dinámico, reload en -95, do_stop/do_status, wan_has_internet, main). Los
+  supervivientes son parsing/logging no crítico. No se persiguió 80% por diminishing
+  returns (requeriría tests quirúrgicos por cada rama de parsing de un .env trivial).
 Cubren: load_env, generate_configs (single source of truth), auto-detect WAN,
 reload en fallo -95, validación real type AP (pass y fail).
 
