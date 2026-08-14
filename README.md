@@ -1,110 +1,98 @@
 # escama-ap
 
-WiFi Access Point service (hostapd + dnsmasq AP converter) with WARP coexistence.
+Convertidor de interfaz WiFi a Access Point (hostapd + dnsmasq) para Debian/Linux.
+El AP emite el SSID `escama`; el tráfico de los clientes sale por la interfaz WAN
+(modo NAT/masquerade).
 
-The **AP (designated access point, "escama")** interface defaults to `wn8200nd`
-(TL-WN8200ND adapter). The **WAN/internet WiFi interface** keeps the name `stonepi`.
+> **Regla de diseño:** la interfaz WAN (por defecto `stonepi`) **solo se lee, nunca se
+> modifica** por el software. El AP usa la otra interfaz (por defecto `wn8200nd`).
 
-## Files
+## Arquitectura (post-refactor 2026-08-14)
 
-- `opt/escama/start-ap.sh` – brings up hostapd + dnsmasq
-- `opt/escama/stop-ap.sh` – stops AP and restores WiFi client mode
-- `opt/escama/toggle-ap.sh` – CLI to toggle AP mode on/off
-- `opt/escama/config-tui.sh` – TUI (whiptail) to configure all settings, including AP interface
-- `opt/escama/cleanup-warp.sh` – nftables rules to coexist with Cloudflare WARP
-- `opt/escama/detect-iface.sh` – detects AP (default `wn8200nd`) and WAN (`stonepi`) interfaces
-- `etc/escama/escama.env` – central configuration (generated/edited by the TUI)
-- `etc/hostapd/hostapd-escama.conf` – hostapd config (SSID: `escama`, WPA2-PSK)
-- `etc/dnsmasq-escama.conf` – DHCP range `10.42.1.10–254`
-- `etc/systemd/system/escama-ap.service` – systemd unit
+Consolidado de 6 scripts bash sueltos → **1 librería Python + 1 TUI**. Menos ruido,
+única fuente de verdad.
 
-## Installation
-
-1. Copy files to system locations:
-   ```bash
-   sudo cp -r opt/escama /opt/
-   sudo mkdir -p /etc/escama
-   sudo cp etc/escama/escama.env /etc/escama/
-   sudo cp etc/hostapd/hostapd-escama.conf /etc/hostapd/
-   sudo cp etc/dnsmasq-escama.conf /etc/
-   sudo cp etc/systemd/system/escama-ap.service /etc/systemd/system/
-   ```
-
-2. Enable and start:
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable escama-ap.service
-   sudo systemctl start escama-ap.service
-   ```
-
-3. Check status:
-   ```bash
-   sudo systemctl status escama-ap
-   tail -f /var/log/escama-ap.log /var/log/escama-cleanup.log
-   ```
-
-## Configuration (TUI)
-
-Run the TUI to configure everything interactively — including choosing the AP
-interface and all network/SSID settings:
-
-```bash
-sudo /opt/escama/config-tui.sh
+```
+opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig
+opt/escama/escama-tui.py    # TUI (whiptail): edita escama.env y regenera confs
+etc/escama/escama.env       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID, etc.)
+etc/hostapd/hostapd-escama.conf    # generado desde escama.env (no editar a mano)
+etc/dnsmasq-escama.conf           # generado desde escama.env (no editar a mano)
+etc/systemd/system/escama-ap.service  # ExecStart=/opt/escama/escama.py start
+tests/test_escama.py        # 9 unit tests (mock de system calls, no toca el sistema)
+setup.cfg                   # config de mutmut (mutation testing)
 ```
 
-This writes `/etc/escama/escama.env` and regenerates the hostapd/dnsmasq configs.
-Restart the service to apply:
+Binarios: `escama` y `escama-tui` → symlinks en `/usr/local/bin/` y `~/.local/bin/`.
+
+## Diseño anti-errores (por qué no se rompe solo)
+
+1. **Validación real del AP**: `do_start()` comprueba `iw dev <AP> info | grep "type AP"`.
+   No usa el `grep ssid` bogus que antes decía "AP activo" mintiendo.
+2. **WAN dinámico**: el masquerade iptables usa `WAN_IFACE` del env
+   (`-o <WAN_IFACE>`), no hardcodeado a `stonepi`. Si cambiás WAN, el NAT sigue funcionando.
+3. **Auto-detección de WAN**: si `WAN_IFACE=""` en el env, se toma de la ruta default
+   (`ip route show default`). Fallback final: `stonepi` (nunca lo modifica).
+4. **Recarga de módulo en fallo -95**: si el driver 8192eu en memoria no expone modo AP
+   (`iw phy` sin `* AP`), `reload_module_if_needed()` hace `rmmod`+`modprobe` del DKMS
+   (CONFIG_AP_MODE=y) y reintenta. Esto soluciona el "Operation not supported" del hostapd.
+5. **Idempotencia**: `start` mata la instancia previa, valida y solo reporta OK si
+   `type AP` es real. `restart` = `stop` + `start`.
+6. **Sin WARP coupling**: se eliminó `cleanup-warp.sh`. WARP + AP no coexisten por diseño
+   de Linux (un tunnel WARP captura todo el tráfico); no se intenta convivir.
+7. **Bug de IP duplicada mitigado**: `do_stop()` y `_ensure_ip()` hacen `ip addr flush`
+   sobre la AP iface, evitando que quede `10.42.1.1/24` pegado en la WAN (que dropeaba
+   las respuestas DNS de los clientes con `ICMP unreachable`).
+
+## Uso
 
 ```bash
-sudo systemctl restart escama-ap.service
+sudo escama.py status        # estado actual
+sudo escama.py start         # levanta el AP (hostapd + dnsmasq + masq + forward)
+sudo escama.py stop          # baja el AP, restaura iface a cliente (NM managed)
+sudo escama.py restart       # stop + start
+sudo escama.py reconnect     # igual que restart pero para reconexión manual tras plug/unplug
+sudo escama.py genconfig     # regenera hostapd/dnsmasq confs desde escama.env
+
+sudo escama-tui              # menú interactivo (whiptail) para editar escama.env
 ```
 
-The AP interface is configured via `AP_IFACE` in `/etc/escama/escama.env`
-(default: `wn8200nd`). The WAN interface is `WAN_IFACE` (default: `stonepi`).
-
-## CLI Toggle Tool
-
-Use `toggle-ap.sh` to switch between AP mode and normal WiFi client mode:
+## systemd
 
 ```bash
-sudo /opt/escama/toggle-ap.sh start    # Activar modo AP
-sudo /opt/escama/toggle-ap.sh stop     # Detener AP, restaurar WiFi cliente
-sudo /opt/escama/toggle-ap.sh restart  # Reiniciar AP
-sudo /opt/escama/toggle-ap.sh status   # Ver estado actual
-sudo /opt/escama/toggle-ap.sh enable   # Habilitar inicio automatico
-sudo /opt/escama/toggle-ap.sh disable  # Deshabilitar y detener AP
+sudo systemctl enable escama-ap.service   # arranca en boot
+sudo systemctl start  escama-ap.service   # levanta ahora
+sudo systemctl status escama-ap.service
 ```
+`Restart=on-failure` reinicia el service si el proceso muere (no por fallo de hardware:
+si el adaptador se desenchufa, hay que correr `sudo escama.py reconnect` a mano).
 
-Shortcuts (equivalent):
+## Migrar AP ↔ WAN (ej. usar stonepi como AP)
+
+Editar `/etc/escama/escama.env`:
+
+```ini
+AP_IFACE="stonepi"
+WAN_IFACE="wn8200nd"
+```
+Luego: `sudo escama.py restart`.
+
+El masquerade y las validaciones usan estos valores; no hay hardcodeos que rompan el cambio.
+(NOTA: hoy stonepi da internet al equipo y al TV vía NAT; invertirlo requiere que
+wn8200nd sea cliente con internet.)
+
+## Testing
+
 ```bash
-sudo /opt/escama/start-ap.sh           # Iniciar AP (legacy)
-sudo /opt/escama/stop-ap.sh            # Detener AP (nuevo)
+cd escama-ap
+PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 9 tests
+python3 -m mutmut run                                         # mutation testing
 ```
+Los tests mockean `run()`/`subprocess`/`os`, así que **nunca tocan stonepi ni wn8200nd**.
 
-## Dependencies
+## Requisitos
 
-- `hostapd`
-- `dnsmasq`
-- `nftables` (for WARP coexistence)
-- `iw`
-- `nmcli` (optional, to set managed no)
-- `whiptail` (for the TUI)
-
-## Network
-
-- AP IP: `10.42.1.1/24`
-- DHCP range: `10.42.1.10 – 10.42.1.254`
-- AP interface: `wn8200nd` (configurable via `AP_IFACE` in `/etc/escama/escama.env`)
-- WAN interface: `stonepi` (configurable via `WAN_IFACE`)
-
-## WARP Coexistence
-
-If Cloudflare WARP is active, `cleanup-warp.sh` inserts `accept` rules into WARP's
-nftables table. If WARP is off, it creates its own table `inet escama-ap` with
-forwarding and masquerade.
-
-## Notes
-
-- Passphrase contains special chars (`#`, `@@`); ensure config files escape properly.
-- The AP interface defaults to `wn8200nd`; override via `AP_IFACE` in `/etc/escama/escama.env`.
-- Rules may need re-application if WARP restarts; consider a cron/timer.
+- Python 3.10+
+- `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
+- Driver RTL8192EU compilado con `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` en este equipo)
+- `whiptail` solo para la TUI
