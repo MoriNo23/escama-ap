@@ -1,38 +1,38 @@
-# escama-ap — Technical Documentation
+# escama-ap — Documentación técnica
 
-> Software that turns a WiFi interface into an Access Point (hostapd + dnsmasq)
-> with NAT output through a WAN interface. Refactored from 6 bash scripts to 1
-> Python core on 2026-08-14 to remove noise and design errors.
+> Software que convierte una interfaz WiFi en Access Point (hostapd + dnsmasq)
+> con salida por una interfaz WAN vía NAT. Convertido de 6 scripts bash a 1 núcleo
+> Python el 2026-08-14 para eliminar ruido y errores de diseño.
 
-## 1. Mental model
+## 1. Modelo mental
 
 ```
- CLIENTS (TV, phone)        AP iface (wn8200nd)          WAN iface (stonepi)
+ CLIENTES (TV, cel)          AP iface (wn8200nd)          WAN iface (stonepi)
  10.42.1.x/24   <--- wifi -->  [escama SSID]  <--- hostapd/dnsmasq --->  NAT masquerade  -->  Internet
 ```
 
-- **AP iface**: emits the SSID, hands out IP/DNS/DHCP to clients. Defaults to `wn8200nd`.
-- **WAN iface**: has internet (client of an external network). Defaults to `stonepi`.
-- The software **never modifies the WAN iface** (golden rule). It only reads its route for masquerade.
+- **AP iface**: emite el SSID, da IP/DNS/DHCP a los clientes. Por defecto `wn8200nd`.
+- **WAN iface**: tiene internet (cliente de una red externa). Por defecto `stonepi`.
+- El software **nunca modifica la WAN iface** (regla de oro). Solo lee su ruta para masquerade.
 
-## 2. Files
+## 2. Archivos
 
-| File | Role |
-|------|------|
-| `opt/escama/escama.py` | Core. Actions: `start\|stop\|restart\|status\|reconnect\|genconfig` |
-| `opt/escama/escama-tui.py` | whiptail TUI. Edits `escama.env`, regenerates confs |
-| `etc/escama/escama.env` | **Single source of truth** |
-| `etc/hostapd/hostapd-escama.conf` | Generated from env. Do not edit by hand |
-| `etc/dnsmasq-escama.conf` | Generated from env. Do not edit by hand |
-| `etc/systemd/system/escama-ap.service` | systemd unit (`ExecStart=/opt/escama/escama.py start`) |
-| `tests/test_escama.py` | 19 unit tests, system-call mocks |
-| `setup.cfg` | mutmut config |
+| Archivo | Rol |
+|---------|-----|
+| `opt/escama/escama.py` | Núcleo. Acciones: `start\|stop\|restart\|status\|reconnect\|genconfig` |
+| `opt/escama/escama-tui.py` | TUI whiptail. Edita `escama.env`, regenera confs |
+| `etc/escama/escama.env` | **Única fuente de verdad** |
+| `etc/hostapd/hostapd-escama.conf` | Generado desde env. No editar a mano |
+| `etc/dnsmasq-escama.conf` | Generado desde env. No editar a mano |
+| `etc/systemd/system/escama-ap.service` | Unit systemd (`ExecStart=/opt/escama/escama.py start`) |
+| `tests/test_escama.py` | 19 unit tests, mocks de system calls |
+| `setup.cfg` | Config mutmut |
 
-## 3. `escama.env` (source of truth)
+## 3. `escama.env` (fuente de verdad)
 
 ```ini
-AP_IFACE="wn8200nd"          # interface that emits the AP
-WAN_IFACE="stonepi"          # interface with internet (empty = auto-detect default route)
+AP_IFACE="wn8200nd"          # interfaz que emite el AP
+WAN_IFACE="stonepi"          # interfaz con internet (vacío = auto-detecta ruta default)
 SSID="escama"
 CHANNEL="6"
 HW_MODE="g"
@@ -47,84 +47,86 @@ DNS1="8.8.8.8"
 DNS2="8.8.4.4"
 ```
 
-Edit any of these and run `sudo escama.py genconfig` (or `restart`) to regenerate
-hostapd/dnsmasq confs. There is no second place to edit by hand.
+Cambiar cualquiera de estos y correr `sudo escama.py genconfig` (o `restart`) regenera
+los confs de hostapd/dnsmasq. No hay 3 lugares que editar a mano.
 
-## 4. `escama.py start` flow (anti-error design)
+## 4. Flujo de `escama.py start` (anti-errores)
 
-1. Load `escama.env`.
-2. If `WAN_IFACE` empty → auto-detect from `ip route show default`; fallback `stonepi`.
-3. If AP iface missing → clear error "plug the adapter in", rc=1.
-4. `nmcli device set <AP> managed no` (free iface from NM).
-5. `reload_module_if_needed()`: if `iw phy <AP>` does not list `* AP`, do
-   `rmmod 8192eu` + `modprobe 8192eu` (reloads DKMS with `CONFIG_AP_MODE=y`). This
-   prevents hostapd's `nl80211: -95 Operation not supported`.
-6. `generate_configs()`: writes hostapd/dnsmasq from env.
-7. Kill previous hostapd/dnsmasq (idempotent).
-8. `ip addr flush` + `ip addr add <AP_IP>/<CIDR> dev <AP>` (mitigates duplicate IP).
+1. Carga `escama.env`.
+2. Si `WAN_IFACE` vacío → auto-detecta desde `ip route show default`; fallback `stonepi`.
+3. Si AP iface no existe → error claro "enchufa el adaptador", rc=1.
+4. `nmcli device set <AP> managed no` (libera la iface de NM).
+5. `reload_module_if_needed()`: si `iw phy <AP>` NO lista `* AP`, hace `rmmod 8192eu`
+   + `modprobe 8192eu` (recarga DKMS con `CONFIG_AP_MODE=y`). Esto evita el
+   `nl80211: -95 Operation not supported` de hostapd.
+6. `generate_configs()`: escribe hostapd/dnsmasq desde el env.
+7. Mata hostapd/dnsmasq previos (idempotente).
+8. `ip addr flush` + `ip addr add <AP_IP>/<CIDR> dev <AP>` (mitiga IP duplicada).
 9. `hostapd -B` + `dnsmasq`.
 10. `sysctl ip_forward=1` + `iptables -t nat -A POSTROUTING -o <WAN> -s <SUBNET> -j MASQUERADE`
-    (dynamic masquerade, uses real WAN_IFACE).
-11. **Real validation**: `iw dev <AP> info | grep "type AP"`. Only then OK.
-    If not → rc=1 (older code lied with `grep ssid`).
+    (masquerade dinámico, usa WAN_IFACE real).
+11. **Valida de verdad**: `iw dev <AP> info | grep "type AP"`. Solo si está → OK.
+    Si no → rc=1 (antes mentía con `grep ssid`).
 
-## 5. Swapping AP ↔ WAN (migration)
+## 5. Cambiar AP ↔ WAN (migración)
 
-Edit `escama.env`:
+Editar `escama.env`:
 ```ini
 AP_IFACE="stonepi"
 WAN_IFACE="wn8200nd"
 ```
-`sudo escama.py restart`. Masquerade and validation use these values; no hardcodes.
-Caution: the WAN must have real internet after the swap.
+`sudo escama.py restart`. El masquerade y validaciones usan estos valores; no hay
+hardcodeos. Precaución: la WAN debe tener internet real tras el cambio.
 
-## 6. Reconnect after plug/unplug
+## 6. Reconexión tras plug/unplug
 
-No auto-reconnect (design decision: manual). If the adapter drops:
+Sin auto-reconnect (decisión de diseño: manual). Si el adaptador se cae:
 ```bash
-sudo escama.py reconnect    # same as restart, for use after re-plugging
+sudo escama.py reconnect    # igual que restart, para usar tras re-enchufar
 ```
-systemd `Restart=on-failure` only covers process death, not missing hardware.
+`Restart=on-failure` en systemd solo cubre muerte de proceso, no hardware ausente.
 
 ## 7. Testing
 
 ```bash
-PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 19 tests, mocked
+PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 15 tests, mocked
 python3 -m mutmut run                                      # mutation testing
 ```
-Tests mock `run()`/`subprocess`/`os` → **never touch stonepi or wn8200nd**.
+Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.
 
-### Mutation testing (mutmut) — improvement loop
-- Suite 1 (9 tests): 772 mutants, ~19% killed. Showed `do_stop`, `do_status`,
-  `wan_has_internet`, `main` were untested.
-- Suite 2 (15 tests): 775 mutants, 264 killed / 158 survived ≈ 62.6%.
-- Suite 3 (19 tests, after adding log()/load_env() + dir-creation fix): 783 mutants,
+### Mutation testing (mutmut) — ciclo de mejora
+- Suite 1 (9 tests): 772 mutantes, ~19% killed. Reveló que `do_stop`, `do_status`,
+  `wan_has_internet`, `main` no estaban cubiertos por tests.
+- Suite 2 (15 tests): 775 mutantes, 264 killed / 158 survived ≈ 62.6%.
+- Suite 3 (19 tests, tras agregar log()/load_env()): 783 mutantes,
   **279 killed / 158 survived ≈ 63.8%**.
-- The 158 survivors are in `load_env()` (parsing a 15-line .env, branches not hit by
-  test inputs) and `log()` (string format). `run()` is the mocked boundary and does
-  not count as a design survivor. The ~346 🙁 are timeouts from the `sleep` in
-  start/stop (technique noise, not real survivors).
-- Conclusion: ALL critical anti-error logic is covered (real `type AP` validation,
-  dynamic masquerade, reload on -95, do_stop/do_status, wan_has_internet, main).
-  Survivors are non-critical parsing/logging. 80% was not chased due to diminishing
-  returns (surgical tests per branch of a trivial .env parser).
+- Los 158 supervivientes restantes están en `load_env()` (parsing de .env de 15 líneas,
+  ramas no ejercitadas por los inputs de test) y `log()` (formato de string). `run()` es
+  el boundary mockeado y no cuenta como superviviente de diseño. Los ~346 🙁 son timeouts
+  por el `sleep` de start/stop (ruido de la técnica, no supervivientes reales).
+- Conclusión: TODA la lógica anti-errores crítica está cubierta (validación type AP,
+  masquerade dinámico, reload en -95, do_stop/do_status, wan_has_internet, main). Los
+  supervivientes son parsing/logging no crítico. No se persiguió 80% por diminishing
+  returns (requeriría tests quirúrgicos por cada rama de parsing de un .env trivial).
+Cubren: load_env, generate_configs (single source of truth), auto-detect WAN,
+reload en fallo -95, validación real type AP (pass y fail).
 
-## 8. Requirements
+## 8. Requisitos
 
 - Python 3.10+, `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
-- RTL8192EU driver built with `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` on this box)
-- `whiptail` only for the TUI
-- WARP: does not coexist with AP (cleanup-warp.sh removed; a WARP tunnel captures
-  all traffic by Linux design)
+- Driver RTL8192EU con `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` en este equipo)
+- `whiptail` solo para la TUI
+- WARP: no coexiste con AP (se eliminó cleanup-warp.sh; un tunnel WARP captura
+  todo el tráfico por diseño de Linux)
 
-## 9. Design errors of the old system (now fixed)
+## 9. Errores de diseño del sistema anterior (ya corregidos)
 
-| Old error | Fix |
-|-----------|-----|
-| `grep ssid` in validation (false positives) | real `grep "type AP"` |
-| Masquerade hardcode `-o stonepi` | `-o <WAN_IFACE>` dynamic |
-| 3 sources of truth (env + 2 confs) | env canonical + genconfig |
-| cleanup-warp.sh coupled to WARP | removed |
-| 6 duplicated bash scripts | 1 `escama.py` |
-| No detection of module without AP_MODE | auto reload on -95 |
-| Duplicate IP 10.42.1.1 on WAN | flush on AP iface |
+| Error viejo | Fix |
+|-------------|-----|
+| `grep ssid` en validación (falsos positivos) | `grep "type AP"` real |
+| Masquerade hardcodeado `-o stonepi` | `-o <WAN_IFACE>` dinámico |
+| 3 fuentes de verdad (env + 2 confs) | env canonical + genconfig |
+| cleanup-warp.sh acoplado a WARP | eliminado |
+| 6 scripts bash duplicados | 1 `escama.py` |
+| Sin detección de módulo sin AP_MODE | reload automático en fallo -95 |
+| IP duplicada 10.42.1.1 en WAN | flush en AP iface |
