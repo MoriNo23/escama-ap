@@ -19,7 +19,7 @@ etc/escama/escama.env       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID
 etc/hostapd/hostapd-escama.conf    # generado desde escama.env (no editar a mano)
 etc/dnsmasq-escama.conf           # generado desde escama.env (no editar a mano)
 etc/systemd/system/escama-ap.service  # ExecStart=/opt/escama/escama.py start
-tests/test_escama.py        # 9 unit tests (mock de system calls, no toca el sistema)
+tests/test_escama.py        # 19 unit tests (mock de system calls, no toca el sistema)
 setup.cfg                   # config de mutmut (mutation testing)
 ```
 
