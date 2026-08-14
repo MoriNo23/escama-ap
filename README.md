@@ -93,11 +93,14 @@ Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200n
 ### Mutation testing (mutmut)
 - 1ª suite (9 tests): 772 mutantes, ~19% killed → reveló funciones sin cubrir
   (`do_stop`, `do_status`, `wan_has_internet`, `main`).
-- 2ª suite (15 tests): 775 mutantes, **264 killed / 158 survived ≈ 62.6%**
-  (excluyendo 353 timeouts por el `sleep` de start/stop, que son ruido de la técnica).
-- Supervivientes restantes: en `log()` (formato de string, no crítico) y `load_env()`
-  (parsing edge cases). `run()` es el boundary mockeado, no cuenta como superviviente
-  de diseño.
+- 2ª suite (15 tests): 775 mutantes, 264 killed / 158 survived ≈ 62.6%.
+- 3ª suite (19 tests, tras agregar log()/load_env() + fix dir-creacion): 783 mutantes,
+  **279 killed / 158 survived ≈ 63.8%**.
+- Supervivientes restantes: en `load_env()` (parsing de .env, ramas no ejercitadas por
+  los inputs de test) y `log()` (formato de string). `run()` es el boundary mockeado.
+  Los ~346 🙁 son timeouts por `sleep` en start/stop (ruido de la técnica).
+- Conclusión: TODA la lógica anti-errores crítica está cubierta. No se persiguió 80%
+  por diminishing returns (tests quirúrgicos por cada rama de parsing de un .env trivial).
 
 ## Requisitos
 
