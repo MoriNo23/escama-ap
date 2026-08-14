@@ -1,15 +1,13 @@
 [Unit]
-Description=escama AP - hostapd + dnsmasq
+Description=escama AP - hostapd + dnsmasq (Python core)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=forking
-ExecStartPre=/opt/escama/detect-iface.sh ap
-ExecStartPre=+/bin/bash -c 'nmcli device set $(/opt/escama/detect-iface.sh ap) managed no'
-ExecStart=/opt/escama/start-ap.sh
-ExecStartPost=/opt/escama/cleanup-warp.sh
-ExecStop=/bin/sh -c 'killall hostapd 2>/dev/null; killall dnsmasq 2>/dev/null; sleep 1; /opt/escama/toggle-ap.sh stop'
+ExecStartPre=/bin/bash -c 'nmcli device set $(/opt/escama/escama.py status >/dev/null 2>&1; grep -oP "AP iface:\\s*\\K\\S+" /etc/escama/escama.env || echo wn8200nd) managed no'
+ExecStart=/opt/escama/escama.py start
+ExecStop=/opt/escama/escama.py stop
 RemainAfterExit=yes
 Restart=on-failure
 RestartSec=10
