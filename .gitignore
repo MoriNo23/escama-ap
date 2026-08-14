@@ -8,3 +8,6 @@ mutants/
 
 # local logs
 /var/log/escama-*.log
+
+# pytest cache
+.pytest_cache/
