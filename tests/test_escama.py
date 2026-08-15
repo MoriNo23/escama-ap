@@ -189,7 +189,7 @@ def test_do_start_validates_real_ap_mode(monkeypatch):
         "CHANNEL": "6", "HW_MODE": "g", "AP_IP": "10.42.1.1", "AP_CIDR": "24",
         "AP_SUBNET": "10.42.1.0/24", "DHCP_START": "10.42.1.10", "DHCP_END": "10.42.1.254",
         "DHCP_LEASE": "12h", "WPA_PASSPHRASE": "x", "DNS1": "8.8.8.8", "DNS2": "8.8.4.4"})
-    monkeypatch.setattr(escama, "generate_configs", lambda c: None)
+    monkeypatch.setattr(escama, "generate_configs", lambda c, kind="": None)
     monkeypatch.setattr(escama, "_kill_procs", lambda: None)
     monkeypatch.setattr(escama, "_ensure_ip", lambda *a: None)
     rc = escama.do_start()
@@ -216,7 +216,7 @@ def test_do_start_fails_when_ap_mode_not_reached(monkeypatch):
         "CHANNEL": "6", "HW_MODE": "g", "AP_IP": "10.42.1.1", "AP_CIDR": "24",
         "AP_SUBNET": "10.42.1.0/24", "DHCP_START": "10.42.1.10", "DHCP_END": "10.42.1.254",
         "DHCP_LEASE": "12h", "WPA_PASSPHRASE": "x", "DNS1": "8.8.8.8", "DNS2": "8.8.4.4"})
-    monkeypatch.setattr(escama, "generate_configs", lambda c: None)
+    monkeypatch.setattr(escama, "generate_configs", lambda c, kind="": None)
     monkeypatch.setattr(escama, "_kill_procs", lambda: None)
     monkeypatch.setattr(escama, "_ensure_ip", lambda *a: None)
     rc = escama.do_start()
@@ -365,3 +365,214 @@ def test_load_env_overrides_defaults(tmp_path, monkeypatch):
     assert cfg["SSID"] == "escama"
 
 
+
+
+# ---------------------------------------------------------------------------
+# VPN egress (ProtonVPN / warp-cli / WireGuard) — fallback y kill-switch
+# ---------------------------------------------------------------------------
+
+def test_yes_parsing():
+    assert escama._yes("yes") and escama._yes("1") and escama._yes("si")
+    assert not escama._yes("no") and not escama._yes("") and not escama._yes("0")
+
+
+def test_iface_is_tunnel_known_names(monkeypatch):
+    monkeypatch.setattr(escama.os.path, "exists", lambda p: False)
+    monkeypatch.setattr(escama, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    assert escama.iface_is_tunnel("proton0")
+    assert escama.iface_is_tunnel("CloudflareWARP")
+    assert escama.iface_is_tunnel("wg0")
+    assert not escama.iface_is_tunnel("stonepi")
+    # leak-protection dummies must never be picked as egress
+    assert not escama.iface_is_tunnel("ipv6leakintrf0")
+    assert not escama.iface_is_tunnel("pvpnksintrf0")
+
+
+def test_iface_is_tunnel_detects_wireguard_kind(monkeypatch):
+    monkeypatch.setattr(escama.os.path, "exists", lambda p: False)
+
+    def fake_run(cmd, check=True, capture=True):
+        class R:
+            returncode = 0
+            stdout = "12: pvpnwg: <POINTOPOINT> ... wireguard numtxqueues 1"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    assert escama.iface_is_tunnel("pvpnwg")
+
+
+def test_detect_vpn_iface_prefers_explicit_override(monkeypatch):
+    monkeypatch.setattr(escama, "iface_is_up", lambda i: i == "proton0")
+    cfg = dict(escama.DEFAULTS, VPN_IFACE="proton0")
+    assert escama.detect_vpn_iface(cfg) == "proton0"
+    # override that is down -> no vpn (does not silently fall back to another)
+    cfg2 = dict(escama.DEFAULTS, VPN_IFACE="wg9")
+    assert escama.detect_vpn_iface(cfg2) == ""
+
+
+def test_detect_vpn_iface_auto(monkeypatch):
+    monkeypatch.setattr(escama, "list_tunnels", lambda: ["proton0", "tun0"])
+    monkeypatch.setattr(escama, "iface_is_up", lambda i: i == "tun0")
+    cfg = dict(escama.DEFAULTS, VPN_IFACE="")
+    assert escama.detect_vpn_iface(cfg) == "tun0"
+
+
+def test_resolve_egress_auto_uses_vpn(monkeypatch):
+    monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "proton0")
+    cfg = dict(escama.DEFAULTS, EGRESS_MODE="auto", WAN_IFACE="stonepi")
+    assert escama.resolve_egress(cfg) == ("proton0", "vpn")
+
+
+def test_resolve_egress_auto_falls_back_to_wan(monkeypatch):
+    monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "")
+    cfg = dict(escama.DEFAULTS, EGRESS_MODE="auto", WAN_IFACE="stonepi")
+    assert escama.resolve_egress(cfg) == ("stonepi", "wan")
+
+
+def test_resolve_egress_vpn_mode_is_fail_closed(monkeypatch):
+    monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "")
+    cfg = dict(escama.DEFAULTS, EGRESS_MODE="vpn", WAN_IFACE="stonepi")
+    assert escama.resolve_egress(cfg) == ("", "none")
+
+
+def test_resolve_egress_wan_mode_ignores_vpn(monkeypatch):
+    monkeypatch.setattr(escama, "detect_vpn_iface",
+                        lambda c: pytest.fail("no debe consultar VPN en modo wan"))
+    cfg = dict(escama.DEFAULTS, EGRESS_MODE="wan", WAN_IFACE="stonepi")
+    assert escama.resolve_egress(cfg) == ("stonepi", "wan")
+
+
+def test_apply_egress_vpn_masquerades_on_tunnel_and_blocks_wan(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 1  # make delete-loops terminate
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    cfg = dict(escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
+               AP_SUBNET="10.42.1.0/24")
+    escama.apply_egress(cfg, "proton0", "vpn")
+    flat = [" ".join(c) for c in calls]
+    # NAT out the tunnel, never out the WAN
+    assert any("nat -A POSTROUTING -o proton0 -s 10.42.1.0/24 -j MASQUERADE"
+               in f.replace("-t ", "") for f in flat)
+    assert not any("-A POSTROUTING -o stonepi" in f for f in flat)
+    # kill-switch: AP traffic must not leak out the WAN in the clear
+    assert any("-A FORWARD -i wn8200nd -o stonepi -s 10.42.1.0/24 -j REJECT"
+               in f for f in flat)
+    # policy routing into the tunnel (warp-cli / wg-quick split tunnel)
+    assert any(f"route add default dev proton0 table {escama.ESCAMA_TABLE}"
+               in f for f in flat)
+    assert any(f"rule add from 10.42.1.0/24 lookup {escama.ESCAMA_TABLE}"
+               in f for f in flat)
+    # MSS clamp for WireGuard MTU
+    assert any("TCPMSS --clamp-mss-to-pmtu" in f for f in flat)
+    assert any("net.ipv4.ip_forward=1" in f for f in flat)
+
+
+def test_apply_egress_wan_has_no_killswitch_or_policy_route(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    cfg = dict(escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
+               AP_SUBNET="10.42.1.0/24")
+    escama.apply_egress(cfg, "stonepi", "wan")
+    flat = [" ".join(c) for c in calls]
+    assert any("-A POSTROUTING -o stonepi -s 10.42.1.0/24 -j MASQUERADE"
+               in f for f in flat)
+    assert not any("-j REJECT" in f and "-A FORWARD" in f for f in flat)
+    assert not any("rule add from" in f for f in flat)
+
+
+def test_apply_egress_none_is_fail_closed(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    cfg = dict(escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
+               AP_SUBNET="10.42.1.0/24")
+    escama.apply_egress(cfg, "", "none")
+    flat = [" ".join(c) for c in calls]
+    assert not any("MASQUERADE" in f and "-A POSTROUTING" in f for f in flat)
+    assert any("-A FORWARD -i wn8200nd -o stonepi -s 10.42.1.0/24 -j REJECT"
+               in f for f in flat)
+
+
+def test_clear_egress_removes_rules_from_state(monkeypatch, tmp_path):
+    state = tmp_path / "state"
+    state.write_text("EGRESS=proton0\nKIND=vpn\n")
+    monkeypatch.setattr(escama, "STATE_FILE", str(state))
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    cfg = dict(escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
+               AP_SUBNET="10.42.1.0/24")
+    escama.clear_egress(cfg)
+    flat = [" ".join(c) for c in calls]
+    assert any("-D POSTROUTING -o proton0" in f for f in flat)
+    assert any("-D POSTROUTING -o stonepi" in f for f in flat)  # legacy cleanup
+    assert any(f"rule del from 10.42.1.0/24 lookup {escama.ESCAMA_TABLE}"
+               in f for f in flat)
+    assert not state.exists()  # state cleared
+
+
+def test_effective_dns_switches_with_vpn():
+    cfg = dict(escama.DEFAULTS, DNS1="8.8.8.8", DNS2="8.8.4.4",
+               VPN_DNS1="10.2.0.1", VPN_DNS2="")
+    assert escama.effective_dns(cfg, "vpn") == ("10.2.0.1", "10.2.0.1")
+    assert escama.effective_dns(cfg, "wan") == ("8.8.8.8", "8.8.4.4")
+    plain = dict(escama.DEFAULTS, VPN_DNS1="")
+    assert escama.effective_dns(plain, "vpn") == ("8.8.8.8", "8.8.4.4")
+
+
+def test_generate_configs_vpn_sets_client_mtu(tmp_path, monkeypatch):
+    monkeypatch.setattr(escama, "HOSTAPD_CONF", str(tmp_path / "hostapd.conf"))
+    monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
+    monkeypatch.setattr(escama, "_read_state", lambda: {"EGRESS": "proton0"})
+    monkeypatch.setattr(escama, "iface_mtu", lambda i: 1420)
+    cfg = dict(escama.DEFAULTS, VPN_DNS1="10.2.0.1", VPN_DNS2="10.2.0.1")
+    escama.generate_configs(cfg, "vpn")
+    dq = (tmp_path / "dnsmasq.conf").read_text()
+    assert "dhcp-option=option:mtu,1420" in dq
+    assert "dhcp-option=option:dns-server,10.2.0.1,10.2.0.1" in dq
+
+
+def test_generate_configs_wan_has_no_mtu_option(tmp_path, monkeypatch):
+    monkeypatch.setattr(escama, "HOSTAPD_CONF", str(tmp_path / "hostapd.conf"))
+    monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
+    escama.generate_configs(dict(escama.DEFAULTS), "wan")
+    dq = (tmp_path / "dnsmasq.conf").read_text()
+    assert "option:mtu" not in dq
