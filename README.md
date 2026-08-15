@@ -18,8 +18,9 @@ opt/escama/escama-tui.py    # TUI (whiptail): edita escama.env y regenera confs
 etc/escama/escama.env       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID, etc.)
 etc/hostapd/hostapd-escama.conf    # generado desde escama.env (no editar a mano)
 etc/dnsmasq-escama.conf           # generado desde escama.env (no editar a mano)
-etc/systemd/system/escama-ap.service  # ExecStart=/opt/escama/escama.py start
-tests/test_escama.py        # 19 unit tests (mock de system calls, no toca el sistema)
+etc/systemd/system/escama-ap.service      # ExecStart=/opt/escama/escama.py start
+etc/systemd/system/escama-egress.service  # watcher VPN: escama.py watch 5
+tests/test_escama.py        # 35 unit tests (mock de system calls, no toca el sistema)
 setup.cfg                   # config de mutmut (mutation testing)
 ```
 
@@ -38,8 +39,11 @@ Binarios: `escama` y `escama-tui` → symlinks en `/usr/local/bin/` y `~/.local/
    (CONFIG_AP_MODE=y) y reintenta. Esto soluciona el "Operation not supported" del hostapd.
 5. **Idempotencia**: `start` mata la instancia previa, valida y solo reporta OK si
    `type AP` es real. `restart` = `stop` + `start`.
-6. **Sin WARP coupling**: se eliminó `cleanup-warp.sh`. WARP + AP no coexisten por diseño
-   de Linux (un tunnel WARP captura todo el tráfico); no se intenta convivir.
+6. **Egress dinámico VPN/WAN**: el NAT ya no está clavado a la WAN. Si hay un tunnel
+   arriba (ProtonVPN, warp-cli, WireGuard, OpenVPN) los clientes salen **por el tunnel**;
+   si no lo hay, fallback automático a la WAN. Ver [docs-es/VPN-EGRESS.md](docs-es/VPN-EGRESS.md).
+   (Corrige la afirmación vieja de que "WARP + AP no coexisten": sí coexisten, sólo
+   había que mover el masquerade y agregar policy routing.)
 7. **Bug de IP duplicada mitigado**: `do_stop()` y `_ensure_ip()` hacen `ip addr flush`
    sobre la AP iface, evitando que quede `10.42.1.1/24` pegado en la WAN (que dropeaba
    las respuestas DNS de los clientes con `ICMP unreachable`).
@@ -53,6 +57,9 @@ sudo escama.py stop          # baja el AP, restaura iface a cliente (NM managed)
 sudo escama.py restart       # stop + start
 sudo escama.py reconnect     # igual que restart pero para reconexión manual tras plug/unplug
 sudo escama.py genconfig     # regenera hostapd/dnsmasq confs desde escama.env
+sudo escama.py egress        # re-evalua salida VPN/WAN sin tirar el AP
+sudo escama.py egress vpn    # forzar salida por tunnel (auto|vpn|wan|<iface>)
+sudo escama.py watch         # loop: sigue el tunnel y reaplica NAT solo
 
 sudo escama-tui              # menú interactivo (whiptail) para editar escama.env
 ```
@@ -64,6 +71,10 @@ sudo systemctl enable escama-ap.service   # arranca en boot
 sudo systemctl start  escama-ap.service   # levanta ahora
 sudo systemctl status escama-ap.service
 ```
+```bash
+sudo systemctl enable --now escama-egress.service   # sigue la VPN automaticamente
+```
+
 `Restart=on-failure` reinicia el service si el proceso muere (no por fallo de hardware:
 si el adaptador se desenchufa, hay que correr `sudo escama.py reconnect` a mano).
 
@@ -108,3 +119,21 @@ Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200n
 - `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
 - Driver RTL8192EU compilado con `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` en este equipo)
 - `whiptail` solo para la TUI
+
+## Salida por VPN (ProtonVPN / WARP / WireGuard)
+
+Si usás una VPN en este equipo, los clientes del AP **no** se quedan sin internet:
+escama detecta el tunnel y mueve el NAT ahí.
+
+```ini
+# /etc/escama/escama.env
+EGRESS_MODE="auto"    # auto = VPN si hay tunnel, si no WAN (fallback)
+                      # vpn  = solo VPN (kill-switch, sin tunnel no navegan)
+                      # wan  = siempre WAN (ignora la VPN)
+VPN_IFACE=""          # vacio = auto-detecta proton0/CloudflareWARP/wg0/tun0/...
+VPN_FORCE_ROUTE="yes" # policy routing tabla 51821 (imprescindible con warp-cli)
+VPN_MSS_CLAMP="yes"   # clamp MSS a la MTU del tunnel (WARP=1280, Proton wg=1420)
+VPN_DNS1="10.2.0.1"   # DNS dentro del tunnel (Proton). WARP: 1.1.1.1
+```
+
+Detalle completo, casos por proveedor y diagnóstico: **[docs-es/VPN-EGRESS.md](docs-es/VPN-EGRESS.md)**.

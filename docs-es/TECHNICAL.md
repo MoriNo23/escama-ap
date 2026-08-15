@@ -63,8 +63,10 @@ los confs de hostapd/dnsmasq. No hay 3 lugares que editar a mano.
 7. Mata hostapd/dnsmasq previos (idempotente).
 8. `ip addr flush` + `ip addr add <AP_IP>/<CIDR> dev <AP>` (mitiga IP duplicada).
 9. `hostapd -B` + `dnsmasq`.
-10. `sysctl ip_forward=1` + `iptables -t nat -A POSTROUTING -o <WAN> -s <SUBNET> -j MASQUERADE`
-    (masquerade dinámico, usa WAN_IFACE real).
+10. `resolve_egress()`: decide salida según `EGRESS_MODE` (auto/vpn/wan) y el tunnel
+    detectado. `apply_egress()` aplica `ip_forward=1`, `MASQUERADE -o <egress>`,
+    FORWARD con conntrack y —si el egress es VPN— `rp_filter=2`, tabla de routing
+    `51821`, MSS clamp y kill-switch contra fuga por la WAN. Ver `docs-es/VPN-EGRESS.md`.
 11. **Valida de verdad**: `iw dev <AP> info | grep "type AP"`. Solo si está → OK.
     Si no → rc=1 (antes mentía con `grep ssid`).
 
@@ -116,8 +118,9 @@ reload en fallo -95, validación real type AP (pass y fail).
 - Python 3.10+, `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
 - Driver RTL8192EU con `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` en este equipo)
 - `whiptail` solo para la TUI
-- WARP: no coexiste con AP (se eliminó cleanup-warp.sh; un tunnel WARP captura
-  todo el tráfico por diseño de Linux)
+- VPN (ProtonVPN / warp-cli / WireGuard): **sí coexiste**. El egress de los clientes
+  se mueve al tunnel automáticamente. Ver `docs-es/VPN-EGRESS.md`.
+  Opcional: `iptables` con soporte `TCPMSS` y `conntrack` (estándar en Debian)
 
 ## 9. Errores de diseño del sistema anterior (ya corregidos)
 
@@ -127,6 +130,7 @@ reload en fallo -95, validación real type AP (pass y fail).
 | Masquerade hardcodeado `-o stonepi` | `-o <WAN_IFACE>` dinámico |
 | 3 fuentes de verdad (env + 2 confs) | env canonical + genconfig |
 | cleanup-warp.sh acoplado a WARP | eliminado |
+| Masquerade clavado a WAN: al conectar VPN los clientes perdían internet | egress dinámico (`resolve_egress`/`apply_egress`): NAT + policy routing + MSS clamp hacia el tunnel, con fallback a WAN |
 | 6 scripts bash duplicados | 1 `escama.py` |
 | Sin detección de módulo sin AP_MODE | reload automático en fallo -95 |
 | IP duplicada 10.42.1.1 en WAN | flush en AP iface |

@@ -30,6 +30,12 @@ DEFAULTS = {
     "WPA_PASSPHRASE": "#GoticasCulonas@@",
     "DNS1": "8.8.8.8",
     "DNS2": "8.8.4.4",
+    "EGRESS_MODE": "auto",
+    "VPN_IFACE": "",
+    "VPN_FORCE_ROUTE": "yes",
+    "VPN_MSS_CLAMP": "yes",
+    "VPN_DNS1": "",
+    "VPN_DNS2": "",
 }
 
 import shutil
@@ -61,6 +67,20 @@ def save_env(cfg):
             f.write(f'{k}="{cfg[k]}"\n')
         f.write('\n# WAN override opcional (dejar vacio = auto-detecta ruta default)\n')
         f.write(f'WAN_IFACE="{cfg["WAN_IFACE"]}"\n')
+
+
+def list_tunnels():
+    """Tunnel-ish ifaces present right now (wireguard/tun/known VPN names)."""
+    known = ("proton0", "pvpn0", "protonwire0", "CloudflareWARP", "warp0",
+             "nordlynx", "mullvad-wg", "wg0", "tun0", "tailscale0")
+    out = []
+    for d in sorted(os.listdir("/sys/class/net")):
+        if d in ("lo", "ipv6leakintrf0", "pvpnksintrf0"):
+            continue
+        if d in known or d.startswith(("wg", "tun", "ppp")) or \
+                os.path.exists(f"/sys/class/net/{d}/tun_flags"):
+            out.append(d)
+    return out
 
 
 def list_ifaces():
@@ -117,6 +137,8 @@ def main():
              "6", f"Rango DHCP: {cfg['DHCP_START']}-{cfg['DHCP_END']}",
              "7", "Passphrase WPA2",
              "8", f"DNS: {cfg['DNS1']}, {cfg['DNS2']}",
+             "9", f"Salida VPN: {cfg['EGRESS_MODE']} ({cfg['VPN_IFACE'] or 'auto-detect'})",
+             "A", f"DNS con VPN: {cfg['VPN_DNS1'] or '(usa DNS normal)'}",
              "E", "EDITAR CONFIG (nvim)",
              "S", "GUARDAR Y SALIR"],
         )
@@ -168,6 +190,34 @@ def main():
                                f"{cfg['DNS1']},{cfg['DNS2']}")
             if v and "," in v:
                 cfg["DNS1"], cfg["DNS2"] = v.split(",", 1)
+        elif choice == "9":
+            sel = whiptail_menu(
+                "Salida de los clientes",
+                "Por donde salen los clientes del AP:",
+                ["auto", "VPN si hay tunnel, si no WAN (recomendado)",
+                 "vpn", "Solo VPN (kill-switch: sin tunnel no hay internet)",
+                 "wan", "Siempre WAN (ignora la VPN)"], 15, 74, 3)
+            if sel:
+                cfg["EGRESS_MODE"] = sel
+            tuns = list_tunnels()
+            items = ["", "auto-detectar"] + [i for pair in [(t, t) for t in tuns]
+                                             for i in pair]
+            pick = whiptail_menu("Interfaz VPN",
+                                 "Tunnel a usar (auto = detectar solo):",
+                                 items, 20, 66, min(len(tuns) + 1, 12))
+            if pick is not None:
+                cfg["VPN_IFACE"] = pick
+        elif choice == "A":
+            v = whiptail_input(
+                "DNS con VPN",
+                "DNS cuando salen por tunnel (Proton: 10.2.0.1 | WARP: 1.1.1.1)\n"
+                "Vacio = usar el DNS normal:",
+                f"{cfg['VPN_DNS1']},{cfg['VPN_DNS2']}" if cfg["VPN_DNS1"] else "")
+            if v is not None:
+                if "," in v:
+                    cfg["VPN_DNS1"], cfg["VPN_DNS2"] = v.split(",", 1)
+                else:
+                    cfg["VPN_DNS1"] = cfg["VPN_DNS2"] = v.strip()
 
     save_env(cfg)
     # regenerar confs

@@ -1,0 +1,16 @@
+[Unit]
+Description=escama egress watcher - sigue el tunnel VPN (Proton/WARP/wg) y reaplica NAT
+After=escama-ap.service
+Wants=escama-ap.service
+PartOf=escama-ap.service
+
+[Service]
+Type=simple
+# Revisa cada 5s si hay tunnel arriba; al conectar/desconectar la VPN reaplica
+# el masquerade, el policy routing y el DNS de los clientes sin tirar el AP.
+ExecStart=/opt/escama/escama.py watch 5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

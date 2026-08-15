@@ -114,8 +114,8 @@ Tests mock `run()`/`subprocess`/`os` → **never touch stonepi or wn8200nd**.
 - Python 3.10+, `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
 - RTL8192EU driver built with `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` on this box)
 - `whiptail` only for the TUI
-- WARP: does not coexist with AP (cleanup-warp.sh removed; a WARP tunnel captures
-  all traffic by Linux design)
+- VPN (ProtonVPN / warp-cli / WireGuard): **does coexist**. Client egress is moved to
+  the tunnel automatically (NAT + policy routing + MSS clamp). See `docs-es/VPN-EGRESS.md`.
 
 ## 9. Design errors of the old system (now fixed)
 
@@ -125,6 +125,7 @@ Tests mock `run()`/`subprocess`/`os` → **never touch stonepi or wn8200nd**.
 | Masquerade hardcode `-o stonepi` | `-o <WAN_IFACE>` dynamic |
 | 3 sources of truth (env + 2 confs) | env canonical + genconfig |
 | cleanup-warp.sh coupled to WARP | removed |
+| Masquerade pinned to WAN: clients lost internet when a VPN came up | dynamic egress (`resolve_egress`/`apply_egress`) toward the tunnel, with WAN fallback |
 | 6 duplicated bash scripts | 1 `escama.py` |
 | No detection of module without AP_MODE | auto reload on -95 |
 | Duplicate IP 10.42.1.1 on WAN | flush on AP iface |
