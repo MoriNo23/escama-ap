@@ -471,8 +471,12 @@ def test_apply_egress_vpn_masquerades_on_tunnel_and_blocks_wan(monkeypatch, tmp_
     # policy routing into the tunnel (warp-cli / wg-quick split tunnel)
     assert any(f"route add default dev proton0 table {escama.ESCAMA_TABLE}"
                in f for f in flat)
-    assert any(f"rule add from 10.42.1.0/24 lookup {escama.ESCAMA_TABLE}"
+    # policy routing into the tunnel uses `iif <ap>` (not `from <subnet>`) so
+    # host-origin traffic from the AP IP is NOT hijacked into the tunnel
+    assert any(f"rule add iif wn8200nd lookup {escama.ESCAMA_TABLE}"
                in f for f in flat)
+    assert not any(f"rule add from 10.42.1.0/24 lookup {escama.ESCAMA_TABLE}"
+                   in f for f in flat)
     # MSS clamp for WireGuard MTU
     assert any("TCPMSS --clamp-mss-to-pmtu" in f for f in flat)
     assert any("net.ipv4.ip_forward=1" in f for f in flat)
@@ -544,8 +548,10 @@ def test_clear_egress_removes_rules_from_state(monkeypatch, tmp_path):
     flat = [" ".join(c) for c in calls]
     assert any("-D POSTROUTING -o proton0" in f for f in flat)
     assert any("-D POSTROUTING -o stonepi" in f for f in flat)  # legacy cleanup
-    assert any(f"rule del from 10.42.1.0/24 lookup {escama.ESCAMA_TABLE}"
+    assert any(f"rule del iif wn8200nd lookup {escama.ESCAMA_TABLE}"
                in f for f in flat)
+    assert not any(f"rule del from 10.42.1.0/24 lookup {escama.ESCAMA_TABLE}"
+                   in f for f in flat)
     assert not state.exists()  # state cleared
 
 

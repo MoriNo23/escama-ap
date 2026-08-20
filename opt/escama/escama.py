@@ -317,7 +317,11 @@ def clear_egress(cfg: dict, egress: str = "", kind: str = "") -> None:
 
     # policy routing
     for _ in range(3):
-        r = run(["ip", "rule", "del", "from", subnet, "lookup", ESCAMA_TABLE],
+        # remove the AP-ingress rule (escama.py uses `iif <ap>`);
+        # see DIAGNOSIS-FINAL.md §4.1 — previously `from <subnet>`, which also
+        # caught host-origin traffic from the AP IP and hijacked it into the
+        # tunnel.
+        r = run(["ip", "rule", "del", "iif", ap, "lookup", ESCAMA_TABLE],
                 check=False)
         if not r or r.returncode != 0:
             break
@@ -369,7 +373,13 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
             run(["ip", "route", "flush", "table", ESCAMA_TABLE], check=False)
             run(["ip", "route", "add", "default", "dev", egress,
                  "table", ESCAMA_TABLE], check=False)
-            run(["ip", "rule", "add", "from", subnet, "lookup", ESCAMA_TABLE,
+            # Match on the AP INGRESS interface, NOT the source subnet.
+            # A `from <subnet>` selector also catches host-originated packets
+            # from the AP IP (10.42.1.1), hijacking host->client scans into the
+            # tunnel (see DIAGNOSIS-FINAL.md §1 / §4.1). `iif <ap>` only matches
+            # forwarded client ingress, so host-origin traffic uses the main
+            # table and reaches clients directly.
+            run(["ip", "rule", "add", "iif", ap, "lookup", ESCAMA_TABLE,
                  "pref", ESCAMA_RULE_PREF], check=False)
 
         # kill-switch: nada del AP puede escaparse por la WAN en claro
