@@ -140,6 +140,128 @@ def iface_exists(iface: str) -> bool:
     return os.path.islink(f"/sys/class/net/{iface}")
 
 
+def iface_type_ap(iface: str) -> bool:
+    """True if `iface` is currently operating as a Wi-Fi Access Point."""
+    if not iface or not iface_exists(iface):
+        return False
+    p = run(["iw", "dev", iface, "info"], capture=True)
+    return bool(p) and "type AP" in (p.stdout or "")
+
+
+def iface_is_routable_wan(iface: str) -> bool:
+    """True if `iface` has a default route toward the internet.
+    Heuristic: `ip route show default dev <iface>` returns something with
+    'via <gw>' (i.e. is a real upstream after excluding tunnels).
+    """
+    if not iface or not iface_exists(iface) or iface_is_tunnel(iface):
+        return False
+    r = run(["ip", "route", "show", "default", "dev", iface], capture=True)
+    return bool(r) and "default" in (r.stdout or "")
+
+
+def detect_ap_iface(cfg: dict) -> str:
+    """Find which iface is currently running as the AP. Order: explicit env
+    > iface holding the AP IP > iface in 'type AP' mode."""
+    forced = (cfg.get("AP_IFACE") or "").strip()
+    if forced and iface_exists(forced):
+        return forced
+    ap_ip = (cfg.get("AP_IP") or "").strip()
+    if ap_ip:
+        r = run(["ip", "-o", "-4", "addr", "show", "to", ap_ip],
+                 capture=True)
+        for line in (r.stdout or "").splitlines():
+            m = re.match(r"\S+\s+(\S+)\s+", line)
+            if m:
+                return m.group(1)
+    # fallback: any Wi-Fi iface in 'type AP' mode
+    try:
+        for i in sorted(os.listdir("/sys/class/net")):
+            if iface_type_ap(i):
+                return i
+    except OSError:
+        pass
+    return ""
+
+
+def detect_wan_iface(cfg: dict) -> str:
+    """Find which iface is the WAN (internet upstream), excluding tunnels and
+    the AP itself."""
+    forced = (cfg.get("WAN_IFACE") or "").strip()
+    if forced and iface_exists(forced) and not iface_is_tunnel(forced):
+        return forced
+    ap = detect_ap_iface(cfg)
+    # all default routes, lowest metric first
+    r = run(["ip", "route", "show", "default"], capture=True)
+    candidates = []
+    for line in (r.stdout or "").splitlines():
+        m = re.search(r"dev (\S+)", line)
+        if m:
+            dev = m.group(1)
+            if dev == ap or iface_is_tunnel(dev):
+                continue
+            metric_m = re.search(r"metric (\d+)", line)
+            candidates.append((int(metric_m.group(1)) if metric_m else 0, dev))
+    # lower metric = higher priority
+    candidates.sort()
+    for _, dev in candidates:
+        if iface_exists(dev) and not iface_is_tunnel(dev) and dev != ap:
+            return dev
+    return ""
+
+
+def _is_tty() -> bool:
+    """True when stdin is connected to a terminal (user running escama
+    directly), False when running under systemd without a TTY."""
+    return sys.stdin and sys.stdin.isatty()
+
+
+def _prompt_iface(role: str, suggestion: str, exclude: str = "") -> str:
+    """Ask the user (interactively) which iface to use as `role`.
+    Falls back to `suggestion` when there are no other candidates or when
+    input is non-interactive (systemd)."""
+    try:
+        present = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        present = []
+    # candidate ifaces: non-tunnels (except when role == "vpn"), excluding lo
+    exclude_set = {exclude, "lo"} if exclude else {"lo"}
+    if role == "vpn":
+        options = [i for i in present if iface_is_tunnel(i)]
+    else:
+        options = [i for i in present
+                   if i not in exclude_set
+                   and not iface_is_tunnel(i)
+                   and iface_exists(i)]
+    if not options:
+        return suggestion
+    if suggestion and len(options) == 1 and options[0] == suggestion:
+        return suggestion
+    print(f"\nescama no pudo auto-detectar '{role}' de forma inequívoca.")
+    print(f"Sugerencia: {suggestion or '(ninguna)'}")
+    print("Opciones disponibles:")
+    for n, i in enumerate(options, 1):
+        extra = " (sugerido)" if i == suggestion else ""
+        print(f"  {n}. {i}{extra}")
+    if not _is_tty():
+        # correr bajo systemd: no podemos preguntar, usar sugerencia
+        log(f"WARN: '{role}' ambiguo y sin TTY; usando sugerencia '{suggestion}'")
+        print(f"\nSin TTY interactivo: usando '{suggestion}'.")
+        return suggestion
+    while True:
+        try:
+            ans = input(f"¿Cuál es el iface {role}? [1-{len(options)} / Enter=sugerido]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return suggestion
+        if not ans:
+            return suggestion
+        if ans.isdigit() and 1 <= int(ans) <= len(options):
+            return options[int(ans) - 1]
+        if ans in options:
+            return ans
+        print("Selección inválida. Probá de nuevo o Enter para usar sugerido.")
+
+
 def wan_has_internet(wan: str) -> bool:
     """Ping the WAN gateway. WAN iface is only READ, never modified."""
     r = run(["ip", "route", "show", "dev", wan], capture=True)
@@ -226,6 +348,27 @@ def iface_mtu(iface: str) -> int:
             return int(f.read().strip())
     except (OSError, ValueError):
         return 1500
+
+
+def iface_gateway(iface: str) -> str:
+    """Default gateway advertised on `iface` (via <gw>), or "" if none/P2P."""
+    r = run(["ip", "route", "show", "dev", iface], capture=True)
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("default"):
+            m = re.search(r"via (\S+)", line)
+            if m:
+                return m.group(1)
+    return ""
+
+
+def iface_addr(iface: str) -> str:
+    """Primary IPv4 address of `iface`, or "" if none assigned."""
+    r = run(["ip", "-o", "-4", "addr", "show", "dev", iface], capture=True)
+    for line in (r.stdout or "").splitlines():
+        m = re.search(r"inet (\S+)", line)
+        if m:
+            return m.group(1).split("/")[0]
+    return ""
 
 
 def resolve_egress(cfg: dict) -> tuple:
@@ -317,7 +460,7 @@ def clear_egress(cfg: dict, egress: str = "", kind: str = "") -> None:
 
     # policy routing
     for _ in range(3):
-        # remove the AP-ingress rule (escama.py uses `iif <ap>`);
+        # remove the AP-ingress rule (escama.py:537-538 uses `iif <ap>`);
         # see DIAGNOSIS-FINAL.md §4.1 — previously `from <subnet>`, which also
         # caught host-origin traffic from the AP IP and hijacked it into the
         # tunnel.
@@ -370,9 +513,31 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
             # tabla dedicada: TODO lo que venga del subnet del AP sale por el
             # tunnel, aunque la default del host siga apuntando a la WAN
             # (caso warp-cli / split-tunnel / kill switch con fwmark).
+            #
+            # Es IMPRESCINDIBLE declarar via <gw> y src <ip> en la ruta default
+            # de la tabla dedicada. Con solo "default dev tun0 scope link" el
+            # kernel responde "Network is unreachable" para cualquier source
+            # que no sea una IP del propio tun0 (caso 10.42.1.x del AP): el
+            # paquete nunca llega al POSTROUTING donde MASQUERADE lo reescribe
+            # -> los clientes se quedan sin internet aunque las reglas NAT
+            # esten perfectas. La via le dice al kernel como alcanzar el
+            # siguiente salto; la src le da una IP valida para el paquete
+            # saliente (MASQUERADE la reescribe despues por la IP del tun0).
+            gw = iface_gateway(egress)
+            src = iface_addr(egress)
             run(["ip", "route", "flush", "table", ESCAMA_TABLE], check=False)
-            run(["ip", "route", "add", "default", "dev", egress,
-                 "table", ESCAMA_TABLE], check=False)
+            # orden ip route: add default [via <gw>] dev <iface> [src <ip>]
+            # table <id>. Sin via, el kernel declara "Network unreachable"
+            # para paquetes con source fuera del subnet del tunnel (caso
+            # AP 10.42.1.x -> tun0): el MASQUERADE nunca llega a correr.
+            cmd = ["ip", "route", "add", "default"]
+            if gw:
+                cmd += ["via", gw]
+            cmd += ["dev", egress]
+            if src:
+                cmd += ["src", src]
+            cmd += ["table", ESCAMA_TABLE]
+            run(cmd, check=False)
             # Match on the AP INGRESS interface, NOT the source subnet.
             # A `from <subnet>` selector also catches host-originated packets
             # from the AP IP (10.42.1.1), hijacking host->client scans into the
@@ -504,18 +669,35 @@ def _ensure_ip(ap: str, ip_addr: str, cidr: str) -> None:
 
 def do_start() -> int:
     cfg = load_env()
-    ap = cfg["AP_IFACE"]
-    wan = cfg["WAN_IFACE"]
+    # --- Auto-detección de roles AP/WAN ---
+    # La regla es: el env explicito gana. Si el iface explicito NO existe
+    # (o es un tunnel) caemos a detección. Si detectar solo es ambiguo y hay
+    # TTY, preguntamos al usuario. Sin TTY (systemd) usamos la sugerencia.
+    ap_env = (cfg.get("AP_IFACE") or "").strip()
+    if ap_env and iface_exists(ap_env) and not iface_is_tunnel(ap_env):
+        ap = ap_env
+    else:
+        ap_suggested = detect_ap_iface(cfg)
+        if ap_suggested:
+            # detección inequívoca: usarla
+            ap = ap_suggested
+        else:
+            # ni el env era valido ni pudimos detectar: mantener env (para
+            # preservar el mensaje de error original "enchufa el adaptador")
+            ap = ap_env or DEFAULTS["AP_IFACE"]
+            # última posibilidad: preguntar al usuario si hay TTY
+            ap = _prompt_iface("AP", ap)
+        cfg["AP_IFACE"] = ap
+        if ap_env and ap != ap_env:
+            log(f"AVISO: AP_IFACE del env='{ap_env}' no era valido, "
+                f"usando detectado='{ap}'")
+
+    wan = detect_wan_iface(cfg)
     if not wan:
-        r = run(["ip", "route", "show", "default"], capture=True)
-        for l in (r.stdout or "").splitlines():
-            m = re.search(r"dev (\S+)", l)
-            if m:
-                wan = m.group(1)
-                break
-        if not wan:
-            wan = "stonepi"
-        cfg["WAN_IFACE"] = wan
+        wan_suggested = cfg.get("WAN_IFACE") or ""
+        wan = _prompt_iface("WAN", wan_suggested, exclude=ap)
+    cfg["WAN_IFACE"] = wan
+    log(f"Roles: AP={ap}  WAN={wan}")
 
     if not iface_exists(ap):
         log(f"ERROR: AP iface {ap} no existe. Enchufa el adaptador.")
@@ -640,12 +822,7 @@ def do_egress(args: list = None) -> int:
             cfg["EGRESS_MODE"] = "vpn"
             cfg["VPN_IFACE"] = args[0].strip()
     if not cfg.get("WAN_IFACE"):
-        r = run(["ip", "route", "show", "default"], capture=True)
-        for l in (r.stdout or "").splitlines():
-            m = re.search(r"dev (\S+)", l)
-            if m:
-                cfg["WAN_IFACE"] = m.group(1)
-                break
+        cfg["WAN_IFACE"] = detect_wan_iface(cfg)
     egress, kind = resolve_egress(cfg)
     apply_egress(cfg, egress, kind)
     # DNS/MTU de los clientes cambian con el tunnel -> regenerar y recargar
@@ -663,12 +840,7 @@ def do_watch(interval: int = 5) -> int:
     while True:
         cfg = load_env()
         if not cfg.get("WAN_IFACE"):
-            r = run(["ip", "route", "show", "default"], capture=True)
-            for l in (r.stdout or "").splitlines():
-                m = re.search(r"dev (\S+)", l)
-                if m:
-                    cfg["WAN_IFACE"] = m.group(1)
-                    break
+            cfg["WAN_IFACE"] = detect_wan_iface(cfg)
         egress, kind = resolve_egress(cfg)
         if (egress, kind) != last:
             log(f"watch: cambio de salida -> {egress or '(ninguna)'} ({kind})")

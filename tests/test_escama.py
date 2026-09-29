@@ -482,6 +482,35 @@ def test_apply_egress_vpn_masquerades_on_tunnel_and_blocks_wan(monkeypatch, tmp_
     assert any("net.ipv4.ip_forward=1" in f for f in flat)
 
 
+def test_apply_egress_vpn_rule_scoped_to_ap_ingress_not_source_subnet(monkeypatch, tmp_path):
+    """Regression for DIAGNOSIS-FINAL.md §1/§4.1: the VPN policy rule must
+    match the AP ingress interface (`iif <ap>`), not the source subnet
+    (`from <subnet>`). A source match also catches host-originated packets
+    from the AP IP (10.42.1.1) and diverts them into the tunnel, breaking
+    host->client scans/connections while VPN egress is active."""
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 1  # make delete-loops terminate
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    cfg = dict(escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
+               AP_SUBNET="10.42.1.0/24")
+    escama.apply_egress(cfg, "proton0", "vpn")
+    flat = [" ".join(c) for c in calls]
+    assert any(f"rule add iif wn8200nd lookup {escama.ESCAMA_TABLE}"
+               in f for f in flat)
+    # the offending source-based selector must be gone
+    assert not any(f"rule add from 10.42.1.0/24 lookup {escama.ESCAMA_TABLE}"
+                   in f for f in flat)
+
+
 def test_apply_egress_wan_has_no_killswitch_or_policy_route(monkeypatch, tmp_path):
     calls = []
 
