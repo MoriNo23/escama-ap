@@ -1225,3 +1225,104 @@ def test_preflight_reporta_rootless(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Rootless: NO DISPONIBLE" in out
     assert "falta el launcher" in out, "el preflight debe nombrar la causa"
+
+
+# ---------------------------------------------------------------------------
+# Fix: run() no debe escalar cuando ya hay capabilities del launcher
+# (el rootless volvia a pedir sudo por comando)
+# ---------------------------------------------------------------------------
+
+def test_run_no_antepone_sudo_con_caps_del_launcher(monkeypatch):
+    """Con capabilities (guard activo) NO debe anteponer sudo: el modo
+    rootless existe justamente para no pedir password."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("ESCAMA_VIA_LAUNCHER", "1")
+    vistos = []
+
+    def fake_subprocess_run(cmd, **kw):
+        vistos.append(cmd)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama.subprocess, "run", fake_subprocess_run)
+    escama.run(["ip", "link", "show"])
+    assert vistos[0] == ["ip", "link", "show"], \
+        f"no debe anteponer sudo bajo el launcher: {vistos[0]}"
+
+
+def test_run_si_antepone_sudo_sin_caps_ni_root(monkeypatch):
+    """Sin root y SIN capabilities, escalar es lo correcto (fallback)."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.delenv("ESCAMA_VIA_LAUNCHER", raising=False)
+    vistos = []
+
+    def fake_subprocess_run(cmd, **kw):
+        vistos.append(cmd)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama.subprocess, "run", fake_subprocess_run)
+    escama.run(["ip", "link", "show"])
+    assert vistos[0] == ["sudo", "ip", "link", "show"]
+
+
+def test_run_no_escala_si_ya_es_root(monkeypatch):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("ESCAMA_VIA_LAUNCHER", raising=False)
+    vistos = []
+
+    def fake_subprocess_run(cmd, **kw):
+        vistos.append(cmd)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama.subprocess, "run", fake_subprocess_run)
+    escama.run(["ip", "link", "show"])
+    assert vistos[0] == ["ip", "link", "show"]
+
+
+def test_tiene_caps_detecta_el_guard():
+    import os as _os
+    previo = _os.environ.get("ESCAMA_VIA_LAUNCHER")
+    try:
+        _os.environ.pop("ESCAMA_VIA_LAUNCHER", None)
+        assert escama._tiene_caps_del_launcher() is False
+        _os.environ["ESCAMA_VIA_LAUNCHER"] = "1"
+        assert escama._tiene_caps_del_launcher() is True
+        _os.environ["ESCAMA_VIA_LAUNCHER"] = "0"
+        assert escama._tiene_caps_del_launcher() is False
+    finally:
+        if previo is None:
+            _os.environ.pop("ESCAMA_VIA_LAUNCHER", None)
+        else:
+            _os.environ["ESCAMA_VIA_LAUNCHER"] = previo
+
+
+def test_probe_y_run_no_divergen_sobre_escalar(monkeypatch):
+    """La probe (rootless_disponible) corre en un proceso SIN caps: debe usar
+    _run_sin_sudo, nunca run(), que si escalaria y haria la prueba mentir."""
+    assert "run(" not in __import__("inspect").getsource(escama.rootless_disponible)
+    assert "_run_sin_sudo" in __import__("inspect").getsource(escama.rootless_disponible)
+
+
+def test_degradacion_nombra_el_motivo_real(monkeypatch, tmp_path, capsys):
+    """Si el launcher no sirve, el mensaje dice el motivo y da la salida, no
+    un FileNotFoundError de subcomando arbitrario."""
+    monkeypatch.setattr(escama, "preflight", lambda: {
+        "estado": "completa", "componentes": {}, "faltan": [],
+        "version_repo": "1", "version_instalada": "1"})
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.delenv("ESCAMA_VIA_LAUNCHER", raising=False)
+    monkeypatch.setattr(escama, "rootless_disponible",
+                        lambda: (False, "el launcher es de uid 0 y no tuyo"))
+    rc = escama.main(["start"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "uid 0 y no tuyo" in err, "debe nombrar el motivo real"
+    assert "sudo escama start" in err, "debe dar la salida exacta"

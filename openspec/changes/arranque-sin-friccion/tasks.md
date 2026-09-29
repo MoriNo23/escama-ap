@@ -37,6 +37,21 @@
 - [ ] 5.4 Degradación explícita: `rmmod`/`modprobe` y `nmcli device set managed no` sin capability/autorización → mensaje claro del motivo, nunca "OK" falso ni silencio. Verificar: tests que simulan el fallo y verifican el mensaje
 - [x] 5.5 Preflight rootless completo (toolchain, xattr, `setcap` efectivo post-exec, unit de usuario) que **niegue** el modo con el motivo cuando algo falte. Verificar: preflight en máquina sin gcc (simulado) dice "no disponible" y nombra la condición — **hecho**: `rootless_disponible()` verifica con una **operación real** (crear/borrar una iface dummy) en vez de confiar en `getcap`, que miente; distingue sin launcher / ya root / owner ajeno / caps que no sobreviven; `preflight` muestra `Rootless: DISPONIBLE|NO DISPONIBLE` con el motivo. La probe se limpia siempre (una dummy huérfana daba falso negativo persistente) y corre **sin auto-sudo** (bajo sudo el kernel no concede las file caps y la prueba miente)
 
+## 5b. Corrección: `run()` re-introduce sudo en modo rootless
+
+> Hallazgo al implementar la fase 2: `run()` anteponía `sudo` siempre que no
+> fuera root, así que **el launcher rootless terminaba pidiendo password por
+> cada comando** — exactamente lo que el modo rootless elimina. Además, bajo
+> `sudo` el kernel no concede las file capabilities (medido), así que el modo
+> rootless no alcanzaba a operar el AP. Contradice el requisito de la spec
+> `uso-sin-privilegios`: "MUST funcionar en modo rootless cuando el launcher
+> tiene capabilities, y MUST escalar por el mecanismo de privilegio del
+> proyecto cuando no las tiene".
+
+- [x] 5b.1 `run()` no debe anteponer `sudo` cuando el proceso ya tiene las capabilities del launcher (detectable con el guard `ESCAMA_VIA_LAUNCHER`), solo cuando no es root y no las tiene. Verificar: test que con `geteuid` no-root + guard activo, `run()` NO antepone sudo, y con guard ausente sí lo antepone — **hecho**: `_tiene_caps_del_launcher()` + condición en `run()`; verificado en vivo: `escama start` sin sudo ya no pide password
+- [x] 5b.2 Coherencia con `_run_sin_sudo()`: la probe de rootless y `run()` no deben divergir sobre si escalar. Verificar: test que compare ambos caminos para el mismo comando — **hecho**: documentada la distinción (probe = nunca escala porque corre sin caps; `run()` = escala solo si hace falta) + test que verifica que la probe no usa `run()`
+- [x] 5b.3 El mensaje de error cuando el launcher falta o no tiene caps debe nombrar el motivo real, no un `FileNotFoundError` de subcomando arbitrario. Verificar: test de la degradación — **hecho**: verificado en vivo quitando las caps (`setcap -r`): el mensaje nombra el motivo real y da la salida exacta; test added
+
 ## 6. Fase 3 — QA y cierre
 
 - [ ] 6.1 Suite completa con path explícito + `mutmut run`; tests nuevos verdes y mutantes del código nuevo killed o documentados. Verificar: `python3 -m pytest tests/test_escama.py -q` en verde y mutmut sin regresiones relevantes

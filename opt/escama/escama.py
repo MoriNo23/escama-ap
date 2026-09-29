@@ -145,9 +145,26 @@ def log(msg: str) -> None:
         pass
 
 
+def _tiene_caps_del_launcher() -> bool:
+    """True si el proceso corre bajo escama-launch (ya tiene capabilities).
+
+    El guard de entorno lo establece _relanzar_rootless() justo antes del
+    execve. Es la señal de que NO hay que escalar: el proceso no es root pero
+    tiene CAP_NET_ADMIN/RAW/BIND_SERVICE, y sudo las perderia (el kernel no
+    concede file capabilities bajo sudo) ademas de pedir password.
+    """
+    return os.environ.get("ESCAMA_VIA_LAUNCHER") == "1"
+
+
 def run(cmd, check=True, capture=True):
-    """Run a command via root (sudo if not already root)."""
-    if os.geteuid() != 0:
+    """Run a command via root (sudo if not already root).
+
+    Con el launcher rootless el proceso NO es root pero ya tiene las
+    capabilities: anteponer sudo ahi seria contraproducente (el kernel no
+    concede file caps bajo sudo, y pediria una password por cada comando, que
+    es justo lo que el modo rootless elimina).
+    """
+    if os.geteuid() != 0 and not _tiene_caps_del_launcher():
         cmd = ["sudo"] + cmd
     try:
         if capture:
@@ -1077,11 +1094,14 @@ PROBE_IFACE = "escama-verify"
 
 
 def _run_sin_sudo(cmd) -> int:
-    """Ejecuta sin el auto-sudo de run().
+    """Ejecuta un comando SIN escalar, aunque falten privileges.
 
-    Imprescindible para verificar el rootless: bajo sudo el kernel no concede
-    las file capabilities al proceso (medido), asi que la prueba daria un falso
-    negativo. Devuelve el codigo de salida, o -1 si no se pudo ejecutar.
+    Distinto de run(), que solo escala cuando hace falta (sin root y sin caps
+    del launcher). Aqui la escalada nunca es la opcion: la probe del rootless se
+    ejecuta en el proceso normal del usuario, que no tiene capabilities, y
+    correrla bajo sudo haria que el kernel no le conceda las file caps al
+    launcher (medido) y la verificacion mienta con un falso negativo.
+    Devuelve el codigo de salida, o -1 si no se pudo ejecutar.
     """
     try:
         return subprocess.run(cmd, capture_output=True).returncode
