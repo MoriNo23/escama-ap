@@ -28,6 +28,12 @@ incluye el bump en su `tasks.md` y una entrada acá.
   unit que falla al iniciar sesión.
 - `VERSION` como fuente única de la versión, leída en runtime por `escama.py`,
   `escama-tui.py` e `install.sh` (antes no había versionado).
+- **CI en GitHub Actions** (`.github/workflows/ci.yml`): job `tests` corre la
+  suite en cada push/PR a `master` (~25 s); job `mutmut` de mutation testing
+  solo manual (`workflow_dispatch`), separado porque sus ~2.200 mutantes
+  tardan 30+ min y son tendencia, no gate. La suite es segura en un runner
+  ajeno por construcción: un fixture `autouse` bloquea `subprocess` durante
+  toda la suite.
 
 ### Cambiado
 - **Rutas de runtime según privilegio**: con root, log/pidfile/state/confs
