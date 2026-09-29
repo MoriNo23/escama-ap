@@ -33,6 +33,32 @@ def patch_run(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _prohibido_tocar_el_sistema(monkeypatch):
+    """Red de seguridad: ningun test puede ejecutar un comando de verdad.
+
+    Contrato declarado en AGENTS.md ("los tests mockean run/subprocess/os => NO
+    tocan stonepi/wn8200nd"). Se cumplia a mano y un test se filtro: mutmut
+    levanto el AP real sobre wn8200nd (la interfaz del usuario) con los DEFAULTS
+    del env. Este fixture convierte esa fuga silenciosa en un fallo con
+    traceback, que es la unica forma de que no vuelva a pasar.
+    """
+    import subprocess
+
+    real = subprocess.run
+
+    def guardia(*a, **k):
+        cmd = a[0] if a else k.get("args")
+        raise AssertionError(
+            "un test intento ejecutar un comando REAL: {!r}. "
+            "Mockea run()/subprocess (ver AGENTS.md).".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", guardia)
+    monkeypatch.setattr(subprocess, "Popen", guardia)
+    yield
+    monkeypatch.setattr(subprocess, "run", real)
+
+
 def test_load_env_defaults():
     assert escama.DEFAULTS["AP_IFACE"] == "wn8200nd"
     assert escama.DEFAULTS["WAN_IFACE"] == "stonepi"
@@ -941,7 +967,14 @@ def test_main_mutante_exige_privilegio_con_mensaje(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 def _preflight_con(tmp_path, monkeypatch, installed=(), codigo_igual=True,
-                   ver_inst="1.0.0"):
+                   ver_inst=None):
+    """Simula una maquina con los componentes indicados en `installed`.
+
+    `ver_inst` por defecto es la version real del repo: si se hardcodea un
+    numero, el test deja de validar nada en cuanto se hace un bump.
+    """
+    if ver_inst is None:
+        ver_inst = open(os.path.join(RAIZ_REPO, "VERSION")).read().strip()
     """Simula una maquina con los componentes indicados en `installed`."""
     for rel in ("escama", "escama-tui"):
         p = tmp_path / "bin" / rel
@@ -1091,6 +1124,11 @@ def test_acciones_mutantes_pasan_por_bootstrap(monkeypatch):
 
 def test_main_preflight_no_pide_privilegio_ni_bootstrap(monkeypatch, capsys):
     """preflight debe correr sin sudo y sin tocar el bootstrap."""
+    # rootless_disponible() ejecuta una sonda REAL (crea/borra una iface
+    # dummy): en un test va siempre mockeada. Aca se mockea aparte porque
+    # este test llama al do_preflight real, no a preflight().
+    monkeypatch.setattr(escama, "rootless_disponible",
+                        lambda: (False, "sin launcher en el test"))
     monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(escama, "preflight",
                         lambda: {"estado": "faltante", "faltan": ["x"],

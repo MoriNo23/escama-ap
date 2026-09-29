@@ -178,6 +178,14 @@ cmd_install() {
     if [ -f "$ENV_DST" ]; then
         cp "$SRC_ENV" "$ENV_DST.new"
         echo "AVISO: $ENV_DST existente: se conserva; novedades en $ENV_DST.new"
+        # Decir QUE variables es nueva: sin esto el aviso obliga a un diff a mano y en
+        # la practica nadie lo lee, asi que las variables nuevas nunca se aplican.
+        _nuevas="$(nuevas_del_env "$SRC_ENV" "$ENV_DST")"
+        if [ -n "$_nuevas" ]; then
+            echo "       variables nuevas en el env del repo, ausentes en el tuyo:"
+            echo "$_nuevas" | sed 's/^/         + /'
+            echo "       agregalas a $ENV_DST a mano si queres los defaults nuevos."
+        fi
     else
         install -m 644 "$SRC_ENV" "$ENV_DST"
     fi
@@ -297,6 +305,13 @@ cmd_disable_user() {
         [ -f "$d/$u" ] && user_systemctl disable --now "$u"
     done
     echo "OK: autostart de usuario deshabilitado."
+}
+
+# Nombres de variable presentes en $1 (env del repo) y AUSENTES en $2 (el del
+# usuario). Solo el nombre de la clave: el valor por defecto se lee del repo.
+nuevas_del_env() {
+    awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$1" | sort -u \
+    | comm -23 - <(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$2" | sort -u)
 }
 
 cmd_uninstall() {

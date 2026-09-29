@@ -9,7 +9,61 @@ declared a version, así que se reconstruyen por épocas a partir de los commits
 del repo. Desde 1.0.0 el bump es explícito: cada change que altera comportamiento
 incluye el bump en su `tasks.md` y una entrada acá.
 
-## [No publicado]
+## 1.1.0 — 2026-09-29
+
+### Agregado
+- **Arranque sin fricción**: `escama preflight` comprueba la máquina antes de
+  operar (componentes, versión del repo frente a la instalada, viabilidad
+  rootless) y ofrece instalar con un solo prompt si falta algo. Los subcomandos
+  de solo lectura (`status`, `--help`, `--version`) nunca piden privilegio.
+- **Modo rootless real**: `/opt/escama/escama-launch` (binario ELF, porque el
+  kernel ignora las file capabilities en scripts con shebang) aporta
+  `CAP_NET_ADMIN`, `CAP_NET_RAW` y `CAP_NET_BIND_SERVICE` al núcleo, de modo que
+  `start`/`stop`/`restart`/`egress` funcionan **sin `sudo`**. El preflight lo
+  verifica con una operación real (crear/borrar una interfaz de prueba), no
+  leyendo `getcap`.
+- **Unit de usuario** (`etc/systemd/user/`, `install.sh enable --user` /
+  `disable --user`): el AP arranca al iniciar sesión sin privileged unit.
+  `enable --user` verifica el modo rootless antes de habilitar, para no dejar un
+  unit que falla al iniciar sesión.
+- `VERSION` como fuente única de la versión, leída en runtime por `escama.py`,
+  `escama-tui.py` e `install.sh` (antes no había versionado).
+
+### Cambiado
+- **Rutas de runtime según privilegio**: con root, log/pidfile/state/confs
+  generados van a `/var` y `/etc` como siempre; sin root van a las rutas del
+  usuario (`XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`). `escama.env`
+  sigue en `/etc` y solo se lee: es la fuente de verdad. `status` muestra el modo
+  y las rutas efectivas, para no confundir "no arrancó" con "no tengo permiso".
+- El AP elige canal 2.4 GHz sin solape con el de la interfaz WAN: `CHANNEL_MODE=auto`
+  (default) lee el canal de la WAN —solo lectura, regla de oro— y elige de
+  `{1,6,11}` el más lejano; `manual` conserva el `CHANNEL` fijo. Verificado en la
+  máquina: la WAN estaba en el canal 3 y el AP pasó de 6 (solapado) a 11.
+- La generación de configs se separó: `watch`/`egress` solo regeneran dnsmasq y
+  nunca reescriben hostapd, así el canal no queda obsoleto tras un cambio de VPN.
+- `install.sh`: ciclo de vida reproducible (`install|uninstall|enable|disable|status`),
+  idempotente y que jamás pisa el `escama.env` del usuario (las novedades quedan
+  en `escama.env.new`).
+
+### Corregido
+- **Degradación explícita**: recargar el módulo del driver (`rmmod`/`modprobe`,
+  necesita `CAP_SYS_MODULE`) y quitarle la interfaz a NetworkManager
+  (`nmcli device set managed no`, necesita autorización de NM) se ignoraban en
+  silencio con `check=False`. Ahora se reporta el fallo con su motivo real, sin
+  reportarlo como exitoso.
+- `run()` auto-elevaba con `sudo` aunque el proceso ya tuviera las capabilities
+  del launcher, pidiendo una contraseña en el camino rootless.
+- `--version` devolvía `desconocido` cuando el comando se invocaba por el symlink
+  que crea `install.sh` (`/usr/local/bin/escama`): la búsqueda del archivo
+  `VERSION` usaba `abspath` y no resolvía el enlace.
+- `install.sh install` avisaba de que había novedades en `escama.env.new` sin
+  decir **cuáles**, lo que en la práctica equivale a no avisar: ahora lista las
+  variables que están en el env del repo y ausentes en el tuyo.
+
+### Documentado
+- `README.md`: versionado, preflight, tabla rootless vs sudo, y unit de usuario.
+- `docs/VPN-EGRESS.md` en inglés; los análisis de debugging pasaron a
+  `docs/diagnostics/`.
 
 ### Cambiado
 - El AP elige canal 2.4 GHz sin solape con el de la interfaz WAN: `CHANNEL_MODE=auto`

@@ -14,14 +14,23 @@ Documentation=file:/opt/escama/README.md
 # arrancar: levanta su propia red y el egress se resuelve despues.
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+# Type=forking, NO oneshot+RemainAfterExit: hostapd arranca con -B y dnsmasq
+# daemoniza, asi que el proceso de `start` termina enseguida. Con oneshot,
+# systemd daba la unit por cumplida para siempre y reportaba `active` aunque
+# hostapd y dnsmasq estuvieran muertos (medido), y con Restart=on-failure no
+# los resucitaba. Con forking+PIDFile systemd sigue al proceso real: si muere,
+# `is-active` lo dice y Restart lo levanta.
+Type=forking
+# %t = XDG_RUNTIME_DIR. Es el mismo pidfile que escribe dnsmasq en modo
+# rootless (ver _lease_path/pidfile en escama.py): no se inventa una ruta.
+PIDFile=%t/dnsmasq-escama.pid
 ExecStart=/opt/escama/escama-launch core start
 ExecStop=/opt/escama/escama-launch core stop
 Restart=on-failure
 RestartSec=10
-# El watcher de egress corre como user service aparte (escama-egress-user.service).
+# El watcher de egress corre como user service aparte (escama-egress.service).
 TimeoutStartSec=120
+TimeoutStopSec=30
 
 [Install]
 WantedBy=default.target
