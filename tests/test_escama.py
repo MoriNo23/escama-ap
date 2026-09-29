@@ -799,3 +799,273 @@ def test_do_egress_no_reescribe_hostapd(monkeypatch, tmp_path):
     assert rc == 0
     assert ha.read_text() == "channel=1\n"
     assert (tmp_path / "dnsmasq.conf").exists()
+
+
+# ---------------------------------------------------------------------------
+# Versionado (spec `versionado`): fuente única + coherencia entre las piezas
+# ---------------------------------------------------------------------------
+
+RAIZ_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def test_escama_lee_la_version_del_archivo_unico():
+    with open(os.path.join(RAIZ_REPO, "VERSION")) as f:
+        esperado = f.read().strip()
+    assert escama.VERSION == esperado, "escama.py debe leer VERSION, no una copia"
+    assert esperado, "VERSION no puede estar vacio"
+
+
+def test_tui_lee_la_misma_version_que_el_core():
+    import importlib.util
+    ruta = os.path.join(RAIZ_REPO, "opt", "escama", "escama-tui.py")
+    spec = importlib.util.spec_from_file_location("escama_tui", ruta)
+    tui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tui)
+    assert tui.read_version() == escama.VERSION
+
+
+def test_install_sh_no_tiene_version_literal():
+    """install.sh debe LEER el VERSION, no llevar su propia copia (que divergiria)."""
+    with open(os.path.join(RAIZ_REPO, "install.sh")) as f:
+        src = f.read()
+    # VERSION="algo" con algo que NO sea un comando substitution ni un numero:
+    # seria una copia literal (el bug que esto previene).
+    import re
+    assert not re.search(r'VERSION="(?!\$\()[^"]+"', src), \
+        "install.sh no debe hardcodear la version"
+    assert not re.search(r"VERSION='(?!\$\()[^']+'", src), \
+        "install.sh no debe hardcodear la version"
+    assert "read_version" in src, "install.sh debe leer la fuente unica"
+
+
+def test_ningun_ejecutable_duplica_la_version():
+    """Ningun ejecutable debe llevar la version como literal."""
+    import re
+    for rel in ("opt/escama/escama.py", "opt/escama/escama-tui.py",
+                "install.sh"):
+        with open(os.path.join(RAIZ_REPO, rel)) as f:
+            src = f.read()
+        assert not re.search(r'VERSION\s*=\s*["\']\d+\.\d+', src), \
+            f"{rel} tiene la version hardcodeada"
+
+
+def test_escama_degrada_la_version_sin_mentir(tmp_path, monkeypatch):
+    """Sin archivo VERSION debe decir 'desconocido', nunca un numero viejo."""
+    import importlib.util
+    src = open(os.path.join(RAIZ_REPO, "opt", "escama", "escama.py")).read()
+    # ejecutar solo la funcion de lectura, aislada, en un arbol sin VERSION
+    ns = {"os": os, "__file__": str(tmp_path / "opt" / "escama" / "escama.py")}
+    exec(compile("\n".join(l for l in src.split("\n")
+                           if not l.startswith(("import ", "VERSION ="))),
+                 "escama.py", "exec"), ns)
+    assert ns["_read_version"]() == "desconocido"
+
+
+# ---------------------------------------------------------------------------
+# Gate de privilegio (spec `uso-sin-privilegios`)
+# ---------------------------------------------------------------------------
+
+def test_acciones_de_solo_lectura_no_piden_privilegio():
+    for a in ("status", "--help", "-h", "help", "--version", "-v", "version"):
+        assert a in escama.ACCIONES_SIN_PRIVILEGIO, a
+    for a in ("start", "stop", "restart", "genconfig", "egress", "watch"):
+        assert a not in escama.ACCIONES_SIN_PRIVILEGIO, a
+
+
+def test_main_solo_lectura_corren_sin_root(monkeypatch, capsys):
+    """status/--help/--version NO deben rebotar por falta de root."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(escama, "do_status", lambda: 0)
+    assert escama.main(["status"]) == 0
+    assert escama.main(["--version"]) == 0
+    assert escama.main(["--help"]) == 0
+    assert "1." in capsys.readouterr().out or "desconocido" in capsys.readouterr().out
+
+
+def test_main_mutante_exige_privilegio_con_mensaje(monkeypatch, capsys):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    called = []
+    monkeypatch.setattr(escama, "do_start", lambda: called.append(1) or 0)
+    rc = escama.main(["start"])
+    assert rc == 1, "una accion mutante sin privilegio debe fallar"
+    assert not called, "no debe ejecutar la accion sin privilegio"
+    err = capsys.readouterr().err
+    assert "sudo" in err and "rootless" in err
+
+
+# ---------------------------------------------------------------------------
+# Preflight y auto-instalacion (spec `auto-instalacion`)
+# ---------------------------------------------------------------------------
+
+def _preflight_con(tmp_path, monkeypatch, installed=(), codigo_igual=True,
+                   ver_inst="1.0.0"):
+    """Simula una maquina con los componentes indicados en `installed`."""
+    for rel in ("escama", "escama-tui"):
+        p = tmp_path / "bin" / rel
+        if rel in installed:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.symlink_to("/opt/escama/x")
+    for rel in ("core", "env", "u1", "u2"):
+        p = {"core": "opt/escama/escama.py", "env": "etc/escama/escama.env",
+             "u1": "units/escama-ap.service",
+             "u2": "units/escama-egress.service"}[rel]
+        if rel in installed:
+            p = tmp_path / p
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x")
+    monkeypatch.setattr(escama, "INSTALL_BIN_DIR", str(tmp_path / "bin"))
+    monkeypatch.setattr(escama, "INSTALL_PREFIX", str(tmp_path / "opt" / "escama"))
+    monkeypatch.setattr(escama, "ENV_FILE", str(tmp_path / "etc/escama/escama.env"))
+    monkeypatch.setattr(escama, "INSTALL_UNIT_DIR", str(tmp_path / "units"))
+    if ver_inst:
+        (tmp_path / "opt" / "escama" / "VERSION").parent.mkdir(
+            parents=True, exist_ok=True)
+        (tmp_path / "opt" / "escama" / "VERSION").write_text(ver_inst)
+    monkeypatch.setattr(escama, "_codigo_difiere", lambda: not codigo_igual)
+    return escama.preflight()
+
+
+def test_preflight_completa(tmp_path, monkeypatch):
+    p = _preflight_con(tmp_path, monkeypatch,
+                       installed=("escama", "escama-tui", "core", "env", "u1", "u2"))
+    assert p["estado"] == "completa"
+    assert p["faltan"] == []
+
+
+def test_preflight_detecta_faltantes(tmp_path, monkeypatch):
+    p = _preflight_con(tmp_path, monkeypatch, installed=(), ver_inst="")
+    assert p["estado"] == "faltante"
+    assert len(p["faltan"]) == 6, "debe listar todos los componentes ausentes"
+
+
+def test_preflight_distingue_desactualizada_por_version(tmp_path, monkeypatch):
+    p = _preflight_con(tmp_path, monkeypatch,
+                       installed=("escama", "escama-tui", "core", "env", "u1", "u2"),
+                       ver_inst="0.9.0")
+    assert p["estado"] == "desactualizada"
+    assert p["version_repo"] != p["version_instalada"]
+
+
+def test_preflight_distingue_desactualizada_por_codigo(tmp_path, monkeypatch):
+    p = _preflight_con(tmp_path, monkeypatch,
+                       installed=("escama", "escama-tui", "core", "env", "u1", "u2"),
+                       codigo_igual=False)
+    assert p["estado"] == "desactualizada", "mismo version pero codigo distinto"
+
+
+def test_preflight_no_modifica_nada(tmp_path, monkeypatch):
+    """preflight es de solo lectura: no crea archivos ni pide privilegio."""
+    _preflight_con(tmp_path, monkeypatch, installed=())
+    antes = sorted(p.name for p in tmp_path.rglob("*"))
+    escama.preflight()
+    assert sorted(p.name for p in tmp_path.rglob("*")) == antes
+
+
+def test_bootstrap_rechaza_y_explica_comando(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(escama, "_is_tty", lambda: True)
+    monkeypatch.setattr(builtins_module := __import__("builtins"), "input",
+                        lambda _="": "n")
+    monkeypatch.setattr(escama, "preflight",
+                        lambda: {"estado": "faltante", "faltan": ["a", "b"],
+                                 "componentes": {}, "version_repo": "1",
+                                 "version_instalada": "(ninguna)"})
+    monkeypatch.setattr(escama, "_repo_root", lambda: str(tmp_path))
+    (tmp_path / "install.sh").write_text("#!/bin/sh\n")
+    assert escama._bootstrap_instalacion() is False
+    out = capsys.readouterr().out
+    assert "Cancelado" in out and "install.sh install" in out
+
+
+def test_bootstrap_sin_tty_no_pregunta(tmp_path, monkeypatch, capsys):
+    """Sin terminal no se pregunta: se imprime el comando y se aborta."""
+    monkeypatch.setattr(escama, "_is_tty", lambda: False)
+    monkeypatch.setattr(escama, "preflight",
+                        lambda: {"estado": "faltante", "faltan": ["a"],
+                                 "componentes": {}, "version_repo": "1",
+                                 "version_instalada": "(ninguna)"})
+    monkeypatch.setattr(escama, "_repo_root", lambda: str(tmp_path))
+    (tmp_path / "install.sh").write_text("#!/bin/sh\n")
+    assert escama._bootstrap_instalacion() is False
+    err = capsys.readouterr().err
+    assert "Sin terminal interactivo" in err and "install.sh install" in err
+
+
+def test_bootstrap_acepta_con_un_solo_prompt(tmp_path, monkeypatch, capsys):
+    """Aceptar -> UN solo run() de install.sh (un prompt de privilegio)."""
+    monkeypatch.setattr(escama, "_is_tty", lambda: True)
+    monkeypatch.setattr(__import__("builtins"), "input", lambda _="": "s")
+    monkeypatch.setattr(escama, "_repo_root", lambda: str(tmp_path))
+    (tmp_path / "install.sh").write_text("#!/bin/sh\n")
+    calls = []
+    estados = iter([{"estado": "faltante", "faltan": ["core"], "componentes": {},
+                     "version_repo": "1", "version_instalada": "(ninguna)"},
+                    {"estado": "completa", "faltan": [], "componentes": {},
+                     "version_repo": "1", "version_instalada": "1"}])
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "preflight", lambda: next(estados))
+    assert escama._bootstrap_instalacion() is True
+    installs = [c for c in calls if "install" in c]
+    assert len(installs) == 1, f"debe invocar install.sh una sola vez, hubo {len(installs)}"
+    assert "Instalacion completa" in capsys.readouterr().out
+
+
+def test_bootstrap_fallido_no_continua(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(escama, "_is_tty", lambda: True)
+    monkeypatch.setattr(__import__("builtins"), "input", lambda _="": "s")
+    monkeypatch.setattr(escama, "_repo_root", lambda: str(tmp_path))
+    (tmp_path / "install.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(escama, "preflight",
+                        lambda: {"estado": "faltante", "faltan": ["core"],
+                                 "componentes": {}, "version_repo": "1",
+                                 "version_instalada": "(ninguna)"})
+
+    def fake_run(cmd, check=True, capture=True):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "boom"
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    assert escama._bootstrap_instalacion() is False
+    assert "fallo" in capsys.readouterr().err
+
+
+def test_acciones_mutantes_pasan_por_bootstrap(monkeypatch):
+    for a in ("start", "stop", "restart", "reconnect", "genconfig", "egress",
+              "watch"):
+        assert a in escama.ACCIONES_CON_BOOTSTRAP, a
+    for a in ("status", "preflight", "--version"):
+        assert a not in escama.ACCIONES_CON_BOOTSTRAP, a
+
+
+def test_main_preflight_no_pide_privilegio_ni_bootstrap(monkeypatch, capsys):
+    """preflight debe correr sin sudo y sin tocar el bootstrap."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(escama, "preflight",
+                        lambda: {"estado": "faltante", "faltan": ["x"],
+                                 "componentes": {}, "version_repo": "1",
+                                 "version_instalada": "(ninguna)"})
+    monkeypatch.setattr(escama, "_bootstrap_instalacion",
+                        lambda: pytest.fail("preflight no debe bootstrap"))
+    assert escama.main(["preflight"]) == 0
+    assert "escama preflight" in capsys.readouterr().out
+
+
+def test_main_mutante_bootstrap_fallido_aborta(monkeypatch):
+    monkeypatch.setattr(escama, "preflight",
+                        lambda: {"estado": "faltante", "faltan": ["x"],
+                                 "componentes": {}, "version_repo": "1",
+                                 "version_instalada": "(ninguna)"})
+    monkeypatch.setattr(escama, "_bootstrap_instalacion", lambda: False)
+    called = []
+    monkeypatch.setattr(escama, "do_start", lambda: called.append(1) or 0)
+    assert escama.main(["start"]) == 1
+    assert not called, "no debe ejecutar la accion si el bootstrap falla"

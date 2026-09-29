@@ -21,7 +21,30 @@ import time
 import re
 
 # --- Version ---
-VERSION = "1.0.0"
+# Fuente UNICA de la version (spec `versionado`): el archivo VERSION de la raiz
+# del repo. Se busca subiendo niveles desde el script, asi funciona igual desde
+# el repo (opt/escama/ -> ../../) que instalado en /opt/escama (-> ../), donde
+# install.sh deja una copia del VERSION al lado del core.
+# Ningun ejecutable guarda una copia literal. Si no se encuentra, degrada a
+# "desconocido": es preferible a mentir con un numero viejo.
+def _read_version() -> str:
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(4):  # script dir + hasta 3 niveles hacia la raiz
+        try:
+            with open(os.path.join(d, "VERSION")) as f:
+                v = f.read().strip()
+            if v:
+                return v
+        except OSError:
+            pass
+        padre = os.path.dirname(d)
+        if padre == d:
+            break
+        d = padre
+    return "desconocido"
+
+
+VERSION = _read_version()
 
 # --- Paths ---
 CONFIG_DIR = "/etc/escama"
@@ -32,6 +55,15 @@ LOG = "/var/log/escama-ap.log"
 LEASE_FILE = "/var/lib/misc/dnsmasq-escama.leases"
 PIDFILE = "/run/dnsmasq-escama.pid"
 STATE_FILE = "/run/escama-egress.state"
+
+# --- Installation (spec `auto-instalacion`) ---
+# Rutas de la instalacion canonica que produce install.sh. El nucleo solo las
+# LEE para el preflight: jamas las escribe (la escritura es de install.sh).
+INSTALL_PREFIX = "/opt/escama"
+INSTALL_BIN_DIR = "/usr/local/bin"
+INSTALL_UNIT_DIR = "/etc/systemd/system"
+INSTALL_UNITS = ("escama-ap.service", "escama-egress.service")
+INSTALL_SCRIPT = "install.sh"
 
 # Routing table used to force client traffic into the VPN tunnel.
 ESCAMA_TABLE = "51821"
@@ -930,12 +962,170 @@ def do_watch(interval: int = 5) -> int:
         time.sleep(interval)
 
 
+# ---------------------------------------------------------------------------
+# Preflight y auto-instalacion (spec `auto-instalacion`)
+# ---------------------------------------------------------------------------
+
+def _version_instalada() -> str:
+    """Version de la copia instalada, o "" si no se puede leer."""
+    try:
+        with open(os.path.join(INSTALL_PREFIX, "VERSION")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _repo_root() -> str:
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(4):
+        if os.path.isfile(os.path.join(d, "VERSION")):
+            return d
+        padre = os.path.dirname(d)
+        if padre == d:
+            break
+        d = padre
+    return ""
+
+
+def _codigo_difiere() -> bool:
+    """True si el core instalado no es identico al del repo."""
+    repo = _repo_root()
+    if not repo:
+        return False
+    try:
+        with open(os.path.join(repo, "opt", "escama", "escama.py")) as f:
+            a = f.read()
+        with open(os.path.join(INSTALL_PREFIX, "escama.py")) as f:
+            b = f.read()
+    except OSError:
+        return False
+    return a != b
+
+
+def preflight() -> dict:
+    """Clasifica la instalacion sin modificarla (spec `auto-instalacion`).
+
+    Estados: `completa`, `desactualizada`, `faltante`. Incluye el detalle de
+    cada componente para que el mensaje sea accionable.
+    """
+    comps = {}
+    for b in ("escama", "escama-tui"):
+        comps[f"comando {b}"] = os.path.lexists(os.path.join(INSTALL_BIN_DIR, b))
+    comps[f"core {INSTALL_PREFIX}/escama.py"] = os.path.isfile(
+        os.path.join(INSTALL_PREFIX, "escama.py"))
+    comps["config /etc/escama/escama.env"] = os.path.isfile(ENV_FILE)
+    for u in INSTALL_UNITS:
+        comps[f"unit {u}"] = os.path.isfile(os.path.join(INSTALL_UNIT_DIR, u))
+
+    faltan = [k for k, ok in comps.items() if not ok]
+    ver_inst = _version_instalada()
+    desactualizada = bool(ver_inst) and (ver_inst != VERSION or _codigo_difiere())
+
+    if faltan:
+        estado = "faltante"
+    elif desactualizada:
+        estado = "desactualizada"
+    else:
+        estado = "completa"
+    return {
+        "estado": estado,
+        "componentes": comps,
+        "faltan": faltan,
+        "version_repo": VERSION,
+        "version_instalada": ver_inst or "(ninguna)",
+    }
+
+
+def do_preflight() -> int:
+    """Reporte de preflight. Solo lectura: no pide privilegio ni cambia nada."""
+    p = preflight()
+    print("=== escama preflight ===")
+    for k, ok in p["componentes"].items():
+        print(f"  [{'ok' if ok else 'FALTA'}] {k}")
+    print(f"Version repo:       {p['version_repo']}")
+    print(f"Version instalada:  {p['version_instalada']}")
+    print(f"Estado:             {p['estado']}")
+    if p["estado"] == "faltante":
+        print("\nFalta la instalacion. Para instalarla:")
+        print(f"  sudo {INSTALL_SCRIPT} install")
+    elif p["estado"] == "desactualizada":
+        print("\nLa instalacion esta desactualizada respecto del repo. Para actualizarla:")
+        print(f"  sudo {INSTALL_SCRIPT} install")
+    return 0
+
+
+def _bootstrap_instalacion() -> bool:
+    """Delega la instalacion en install.sh (unica implementacion) con un prompt.
+
+    True si la instalacion quedo lista; False si el usuario rechazo o fallo.
+    """
+    repo = _repo_root()
+    script = os.path.join(repo, INSTALL_SCRIPT) if repo else INSTALL_SCRIPT
+    print("escama no esta instalado en esta maquina.")
+    print(f"  Comandos faltantes: {', '.join(preflight()['faltan'])}")
+    if not os.path.isfile(script):
+        print(f"\nNo encuentro {INSTALL_SCRIPT}. Instalalo manualmente y reintenta.",
+              file=sys.stderr)
+        return False
+    if not _is_tty():
+        print(f"\nSin terminal interactivo: no puedo preguntar. Instala con:\n"
+              f"  sudo {script} install", file=sys.stderr)
+        return False
+    try:
+        r = input("¿Instalo ahora? [s/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if r not in ("s", "si", "sí", "y", "yes"):
+        print(f"Cancelado. Instala manualmente con:\n  sudo {script} install")
+        return False
+    # Un unico prompt de privilegio: install.sh hace el resto con su propio sudo
+    # (sudo cachea la credencial, asi que no vuelve a pedirla).
+    p = run(["bash", script, "install"], check=False, capture=True)
+    if p is None or p.returncode != 0:
+        print("ERROR: la instalacion fallo. Instalalo manualmente con:\n"
+              f"  sudo {script} install", file=sys.stderr)
+        return False
+    post = preflight()
+    if post["estado"] == "faltante":
+        print("ERROR: la instalacion quedo incompleta.", file=sys.stderr)
+        return False
+    print(f"Instalacion completa (estado: {post['estado']}).")
+    return True
+
+
+# --- Gate de privilegio (spec `uso-sin-privilegios`) ---
+# El gate NO es global: las acciones de solo lectura corren sin privilegio y las
+# que mutan el sistema requieren root o el launcher rootless (fase 2 del change).
+ACCIONES_SIN_PRIVILEGIO = ("status", "--help", "-h", "help", "--version", "-v",
+                          "version", "preflight")
+ACCIONES_CON_BOOTSTRAP = ("start", "stop", "restart", "reconnect", "genconfig",
+                          "egress", "watch")
+
+
 def main(args: list = None) -> int:
-    if os.geteuid() != 0:
-        print("Este script necesita sudo. Ejecutalo con: sudo escama ...", file=sys.stderr)
-        return 1
     argv = args if args is not None else sys.argv[1:]
     action = argv[0] if len(argv) > 0 else "status"
+
+    # Auto-instalacion (spec `auto-instalacion`): antes de una accion que muta el
+    # sistema, si falta la instalacion se ofrece completarla. Sin TTY no se
+    # pregunta: se imprime el comando y se sigue (el servicio puede estar bien
+    # instalado y ser la invocacion local la que llego antes).
+    if action in ACCIONES_CON_BOOTSTRAP:
+        p = preflight()
+        if p["estado"] == "faltante" and not _bootstrap_instalacion():
+            return 1
+
+    # Solo lectura: nunca pide privilegio, ni siquiera para imprimirse.
+    if action not in ACCIONES_SIN_PRIVILEGIO and os.geteuid() != 0:
+        # Modo rootless (escama-launch con capabilities) todavia no implementado:
+        # se implementa en la fase 2 del change. Mientras tanto se pide privilegio,
+        # con un mensaje que explica el camino rootless disponible.
+        print("Esta accion modifica el sistema y necesita privilegio.\n"
+              "  Ejecutala con sudo:  sudo escama " + " ".join(argv) + "\n"
+              "  (el modo rootless sin sudo llega con la fase 2 del change "
+              "arranque-sin-friccion)", file=sys.stderr)
+        return 1
 
     # global flags
     if action in ("--help", "-h", "help"):
@@ -951,7 +1141,11 @@ def main(args: list = None) -> int:
         print("             uso: escama egress [auto|vpn|wan|<iface>]")
         print("  watch      Loop que sigue el estado del tunnel y reaplica NAT")
         print("  edit       Abre escama.env en $EDITOR (nvim por defecto)")
+        print("  preflight  Estado de la instalacion (solo lectura, sin sudo)")
         print("\nOpciones: --help|-h  --version|-v")
+        print("\nSin sudo: status, preflight, --help y --version.")
+        print("Con sudo (o rootless): start, stop, restart, reconnect,")
+        print("genconfig, egress, watch.")
         return 0
     if action in ("--version", "-v", "version"):
         print(f"escama {VERSION}")
@@ -990,6 +1184,8 @@ def main(args: list = None) -> int:
         except ValueError:
             interval = 5
         return do_watch(interval)
+    elif action == "preflight":
+        return do_preflight()
     elif action == "edit":
         editor = os.environ.get("EDITOR", "nvim")
         os.execvp(editor, [editor, ENV_FILE])

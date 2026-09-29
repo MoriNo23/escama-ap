@@ -24,7 +24,17 @@ SRC_CODE="$REPO/opt/escama"
 SRC_ENV="$REPO/etc/escama/escama.env"
 SRC_UNITS="$REPO/etc/systemd/system"
 UNITS="escama-ap.service escama-egress.service"
-VERSION="1.0.0"
+
+# Version desde la fuente UNICA del repo (archivo VERSION). install.sh jamas
+# guarda una copia literal: si falta, lo dice en vez de mentir.
+read_version() {
+    if [ -f "$REPO/VERSION" ]; then
+        cat "$REPO/VERSION"
+    else
+        echo "desconocido"
+    fi
+}
+VERSION="$(read_version)"
 
 uso() {
     cat <<EOF
@@ -56,6 +66,11 @@ cmd_install() {
     # codigo: copia fresca al destino canonico (/opt/escama)
     install -m 755 "$SRC_CODE/escama.py"     "$OPT_DIR/escama.py"
     install -m 755 "$SRC_CODE/escama-tui.py" "$OPT_DIR/escama-tui.py"
+    # la fuente unica de version viaja con el core: sin esto, la copia instalada
+    # no tendria de donde leer la version y reportaria "desconocido".
+    if [ -f "$REPO/VERSION" ]; then
+        install -m 644 "$REPO/VERSION" "$OPT_DIR/VERSION"
+    fi
     ln -sfn "$OPT_DIR/escama.py"     "$BIN_DIR/escama"
     ln -sfn "$OPT_DIR/escama-tui.py" "$BIN_DIR/escama-tui"
     # env: NUNCA se pisa el del usuario (novedades al lado, en .new)

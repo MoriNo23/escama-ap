@@ -17,17 +17,17 @@
 
 ## 3. Fase 1 — Versionado por cambios (D1)
 
-- [ ] 3.1 Crear la fuente única de versión (archivo de una línea en la raíz) y hacer que `escama.py`, `escama-tui.py` e `install.sh` la lean en runtime; eliminar los literales `VERSION = "1.0.0"` duplicados. Verificar: los tres `--version` reportan lo mismo y un `grep` no encuentra la versión como literal en los ejecutables
-- [ ] 3.2 Escribir `CHANGELOG.md` con la serie 0.x retrospectiva por épocas (0.1 núcleo, 0.2 VPN egress, 0.3 selección de canal, 0.4 instalación/autostart) + entrada de este change. Verificar: el archivo reconstruye qué versión tenía cada comportamiento
-- [ ] 3.3 Test de coherencia: los tres puntos de entrada leen la misma fuente. Verificar: test nuevo en `python3 -m pytest tests/test_escama.py -q` en verde
-- [ ] 3.4 Documentar la disciplina de bump semver por change (un paso en el `tasks.md` de cada change + entrada de CHANGELOG) en `AGENTS.md`. Verificar: la sección existe en AGENTS.md
+- [x] 3.1 Crear la fuente única de versión (archivo de una línea en la raíz) y hacer que `escama.py`, `escama-tui.py` e `install.sh` la lean en runtime; eliminar los literales `VERSION = "1.0.0"` duplicados. Verificar: los tres `--version` reportan lo mismo y un `grep` no encuentra la versión como literal en los ejecutables — **hecho**: archivo `VERSION` + lectura por niveles (funciona en repo y en `/opt`); los tres reportan `1.0.0`; `grep` sin literales
+- [x] 3.2 Escribir `CHANGELOG.md` con la serie 0.x retrospectiva por épocas (0.1 núcleo, 0.2 VPN egress, 0.3 selección de canal, 0.4 instalación/autostart) + entrada de este change. Verificar: el archivo reconstruye qué versión tenía cada comportamiento — **hecho**: `CHANGELOG.md` con serie 0.x por épocas + sección "No publicado" con lo de este change
+- [x] 3.3 Test de coherencia: los tres puntos de entrada leen la misma fuente. Verificar: test nuevo en `python3 -m pytest tests/test_escama.py -q` en verde — **hecho**: 5 tests nuevos (fuente única, TUI coherente, sin literal, sin duplicados, degradación a "desconocido"); **53 passed**
+- [x] 3.4 Documentar la disciplina de bump semver por change (un paso en el `tasks.md` de cada change + entrada de CHANGELOG) en `AGENTS.md`. Verificar: la sección existe en AGENTS.md — **hecho**: sección "Versionado (obligatorio)" en AGENTS.md
 
 ## 4. Fase 1 — Auto-instalación y gate por subcomando (D5, D4-lectura)
 
-- [ ] 4.1 Implementar `preflight()`: clasificar la instalación como "instalada" / "desactualizada" / "faltante" comparando symlinks, código en `/opt/escama`, env, units y versión contra el repo. Verificar: tests con los tres estados simulados
-- [ ] 4.2 Bootstrap: al detectar instalación faltante en una acción mutante, delegar en `install.sh install` con un mensaje previo y un único prompt; re-verificar y continuar la acción original. Rechazo → comando manual + error claro. Verificar: tests de acepta / rechaza / un-solo-prompt
-- [ ] 4.3 Gate de root por subcomando: `--help`/`--version`/`status` sin privilegio; mutantes vía rootless o escalación de un prompt. Verificar: tests simulando `geteuid` no-root por subcomando
-- [ ] 4.4 TUI: leer la versión de la fuente única y pasar su gate a por-acción. Verificar: `escama-tui --version` coincide con `escama --version` sin root
+- [x] 4.1 Implementar `preflight()`: clasificar la instalación como "instalada" / "desactualizada" / "faltante" comparando symlinks, código en `/opt/escama`, env, units y versión contra el repo. Verificar: tests con los tres estados simulados — **hecho**: `preflight()` + subcomando `preflight` (solo lectura, sin sudo); distingue `completa`/`desactualizada` (por versión **y** por código) / `faltante`; verificado en vivo en los tres estados
+- [x] 4.2 Bootstrap: al detectar instalación faltante en una acción mutante, delegar en `install.sh install` con un mensaje previo y un único prompt; re-verificar y continuar la acción original. Rechazo → comando manual + error claro. Verificar: tests de acepta / rechaza / un-solo-prompt — **hecho**: `_bootstrap_instalacion()` con TTY → un prompt de confirmación y **un solo** `run()` de install.sh; sin TTY imprime el comando y aborta; rechazo/fallo → mensaje con el comando manual; la lógica vive solo en install.sh (sin duplicar)
+- [x] 4.3 Gate de root por subcomando: `--help`/`--version`/`status` sin privilegio; mutantes vía rootless o escalación de un prompt. Verificar: tests simulando `geteuid` no-root por subcomando — **hecho**: `ACCIONES_SIN_PRIVILEGIO` + gate en `main()`; `status`/`--help`/`--version` corren sin sudo (antes rebotaban), las mutantes piden privilegio con mensaje que anuncia el modo rootless de la fase 2
+- [x] 4.4 TUI: leer la versión de la fuente única y pasar su gate a por-acción. Verificar: `escama-tui --version` coincide con `escama --version` sin root — **hecho**: `read_version()` + gate por acción; `escama-tui --version` da `1.0.0` sin sudo
 
 ## 5. Fase 2 — Rootless real (D2, D3, D4)
 

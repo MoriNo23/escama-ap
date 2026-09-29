@@ -111,18 +111,46 @@ def whiptail_input(title, text, init):
     return p.stdout.strip()
 
 
+def read_version() -> str:
+    """Version desde la fuente UNICA (archivo VERSION), nunca una copia literal.
+
+    Misma busqueda que escama.py: el directorio del script y su padre, para
+    funcionar tanto desde el repo como desde /opt/escama.
+    """
+    aqui = os.path.dirname(os.path.abspath(__file__))
+    d = aqui
+    for _ in range(4):  # script dir + hasta 3 niveles hacia la raiz del repo
+        try:
+            with open(os.path.join(d, "VERSION")) as f:
+                v = f.read().strip()
+            if v:
+                return v
+        except OSError:
+            pass
+        padre = os.path.dirname(d)
+        if padre == d:
+            break
+        d = padre
+    return "desconocido"
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h", "help"):
         print("escama-tui - TUI de configuracion para escama-ap")
-        print("Uso: sudo escama-tui [--help|--version]")
+        print("Uso: escama-tui [--help|--version]")
         print("  --help     Muestra esta ayuda")
         print("  --version  Version instalada")
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v", "version"):
-        print("escama-tui 1.0.0")
+        print(f"escama-tui {read_version()}")
         sys.exit(0)
+    # Gate por accion (spec `uso-sin-privilegios`): --help/--version ya salie-
+    # ron; el menu lee el env pero escribirlo requiere privilegio, asi que el
+    # gate queda para las acciones que mutan /etc/escama.
     if os.geteuid() != 0:
-        print("Necesita sudo: sudo escama-tui", file=sys.stderr)
+        print("Editar la configuracion necesita privilegio.\n"
+              "  Ejecutalo con sudo:  sudo escama-tui\n"
+              "  (--help y --version funcionan sin sudo)", file=sys.stderr)
         sys.exit(1)
     cfg = load_env()
     while True:

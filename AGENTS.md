@@ -39,6 +39,17 @@ README está desactualizado: dice "15 tests" y sugiere `PYTHONPATH=opt/escama`
 - `log()` escribe a `/var/log/escama-ap.log` + syslog + print; envuelto en
   try/except para nunca crashear.
 
+## Versionado (obligatorio)
+- **Fuente única**: el archivo `VERSION` en la raíz. `escama.py`, `escama-tui.py`
+  e `install.sh` la leen en runtime. Prohibido hardcodear la versión en cualquier
+  ejecutable (hay un test que lo falla). Si no se encuentra el archivo, degradar
+  a `desconocido`, nunca a un número viejo.
+- **Bump por change**: todo change que altere comportamiento incluye en su
+  `tasks.md` un paso de bump semver razonado — patch = corrige algo que ya violaba
+  su spec, minor = requisito nuevo compatible, major = ruptura de contrato — **y**
+  su entrada en `CHANGELOG.md`. El bump ocurre antes de archivar el change.
+- `CHANGELOG.md` cubre también la serie 0.x (historia previa al versionado).
+
 ## Pitfalls
 - REGLA DE ORO: la WAN (`stonepi` por defecto) SOLO se lee, NUNCA se modifica
   (ni `ip addr del`, ni `nmcli`, ni `hostapd`) salvo que el env lo diga.
