@@ -1,0 +1,16 @@
+[Unit]
+Description=escama egress watcher (modo usuario) - sigue el tunnel VPN y reaplica NAT
+Documentation=file:/opt/escama/README.md
+# Corre `escama watch` con las capabilities del launcher: el watcher decide si el
+# egress es el tunnel VPN o la WAN y reaplica NAT + policy routing + DNS. Sin
+# capabilities, cada `ip rule`/`iptables` pediria sudo.
+
+[Service]
+Type=simple
+ExecStart=/opt/escama/escama-launch core watch 5
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

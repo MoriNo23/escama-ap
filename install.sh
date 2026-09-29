@@ -24,6 +24,9 @@ SRC_CODE="$REPO/opt/escama"
 SRC_ENV="$REPO/etc/escama/escama.env"
 SRC_UNITS="$REPO/etc/systemd/system"
 UNITS="escama-ap.service escama-egress.service"
+# Units de USUARIO para el modo rootless (spec `uso-sin-privilegios`).
+USER_UNITS="escama-ap.service escama-egress.service"
+USER_UNIT_SRC="$REPO/etc/systemd/user"
 # Capabilities del modo rootless (spec `uso-sin-privilegios`). D1 design.md.
 ESCAMA_CAPS="cap_net_admin,cap_net_raw,cap_net_bind_service+ep"
 LAUNCH_SRC="$REPO/opt/escama/escama-launch.c"
@@ -50,7 +53,9 @@ Uso:
   sudo ./install.sh enable      habilita el arranque al boot y arranca
   sudo ./install.sh disable     deshabilita el arranque y detiene ahora
   ./install.sh status           estado por componente
-  ./install.sh --verify-rootless   prueba el modo sin sudo (sin Privilegio)
+  sudo ./install.sh enable --user    autostart sin sudo (user units, al iniciar sesion)
+  sudo ./install.sh disable --user   deshabilita el autostart de usuario
+  ./install.sh --verify-rootless   prueba el modo sin sudo (sin privilegio)
 
 Opciones: --help|-h | --version|-v
 EOF
@@ -117,7 +122,7 @@ instalar_launcher() {
     #        ./install.sh --verify-rootless
     #    El preflight del core hace esa misma comprobacion en tiempo de uso.
     echo "Launcher instalado (owner uid $TARGET_UID). Para verificar el modo"
-    echo "rootless sin sudo:  ./$INSTALL_SCRIPT --verify-rootless"
+    echo "rootless sin sudo:  ./$0 --verify-rootless"
     return 0
 }
 
@@ -185,8 +190,113 @@ cmd_install() {
         fi
     done
     systemctl daemon-reload
+    instalar_user_units
     echo "OK: instalado. Autostart (install no lo modifica):"
     cmd_status
+}
+
+# --- Units de usuario (modo rootless) ---
+user_unit_dir() {
+    # install.sh corre con sudo, asi que $HOME es /root: las user units deben
+    # ir al home del usuario REAL (SUDO_USER), o quedarian donde ningun user
+    # manager las mira.
+    local home="$HOME"
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+        home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+    fi
+    [ -n "$home" ] || home="$HOME"
+    if [ -n "${XDG_CONFIG_HOME:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        echo "$XDG_CONFIG_HOME/systemd/user"
+    else
+        echo "$home/.config/systemd/user"
+    fi
+}
+
+# Corre un comando del user manager de systemd del usuario REAL.
+# install.sh va con sudo, asi que el bus del usuario no esta disponible:
+# hay que invocar como el usuario, con SU runtime dir. Sin esto falla con
+# "Failed to connect to bus" (medido en esta maquina).
+user_systemctl() {
+    if systemctl --user "$@" 2>/dev/null; then
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ] || [ -z "${SUDO_USER:-}" ]; then
+        return 1
+    fi
+    local _uid _rt
+    _uid="$(id -u "$SUDO_USER")"
+    _rt="/run/user/$_uid"
+    [ -d "$_rt" ] || return 1
+    runuser -u "$SUDO_USER" -- env XDG_RUNTIME_DIR="$_rt" \
+        systemctl --user "$@" 2>/dev/null
+}
+
+# Instala las user units. NO habilita el autostart: eso es `enable --user`.
+instalar_user_units() {
+    local d u
+    d="$(user_unit_dir)"
+    if [ ! -d "$USER_UNIT_SRC" ]; then
+        echo "AVISO: no hay etc/systemd/user en el repo; sin modo rootless autostart" >&2
+        return 1
+    fi
+    mkdir -p "$d"
+    for u in $USER_UNITS; do
+        if [ -f "$USER_UNIT_SRC/$u" ]; then
+            install -m 644 "$USER_UNIT_SRC/$u" "$d/$u"
+        else
+            echo "AVISO: falta $USER_UNIT_SRC/$u; se omite" >&2
+        fi
+    done
+    # daemon-reload del user manager. install.sh corre con sudo, asi que el
+    # bus del usuario no esta en $DBUS_SESSION_BUS_ADDRESS ni $XDG_RUNTIME_DIR:
+    # hay que invocarlo como el usuario, apuntando a SU runtime dir. Sin eso
+    # falla con "Failed to connect to bus" (medido).
+    if user_systemctl daemon-reload; then
+        echo "OK: user units instaladas en $d (user manager recargado)"
+    else
+        echo "AVISO: no pude hablar con el user manager de systemd." >&2
+        echo "       Las units quedaron en $d; corré 'systemctl --user daemon-reload'" >&2
+        echo "       cuando tengas sesion, y despues '$0 enable --user'." >&2
+    fi
+    return 0
+}
+
+cmd_enable_user() {
+    local d u
+    d="$(user_unit_dir)"
+    for u in $USER_UNITS; do
+        if [ ! -f "$d/$u" ]; then
+            echo "AVISO: $u no instalado como user unit. Corré: sudo $0 install" >&2
+            continue
+        fi
+    done
+    if [ ! -x "$OPT_DIR/escama-launch" ]; then
+        echo "AVISO: no hay launcher en $OPT_DIR; el modo rootless no puede arrancar el AP." >&2
+        echo "       Reinstalá con: sudo $0 install" >&2
+        return 1
+    fi
+    if ! verificar_rootless; then
+        echo "AVISO: el modo rootless no verifica en esta maquina (mira 'preflight')." >&2
+        echo "       No habilito el autostart de usuario para no dejar un unit que falla." >&2
+        return 1
+    fi
+    user_systemctl daemon-reload || {
+        echo "ERROR: sin user manager de systemd (sesion sin bus?)." >&2
+        return 1
+    }
+    for u in $USER_UNITS; do
+        [ -f "$d/$u" ] && user_systemctl enable --now "$u"
+    done
+    echo "OK: autostart de usuario habilitado (arranca al iniciar sesion, sin sudo)."
+}
+
+cmd_disable_user() {
+    local d u
+    d="$(user_unit_dir)"
+    for u in $USER_UNITS; do
+        [ -f "$d/$u" ] && user_systemctl disable --now "$u"
+    done
+    echo "OK: autostart de usuario deshabilitado."
 }
 
 cmd_uninstall() {
@@ -270,6 +380,8 @@ case "${1:-}" in
     status)    cmd_status ;;
     --help|-h|help)         uso ;;
     --version|-v|version)   echo "escama install.sh $VERSION" ;;
+    "enable --user")   cmd_enable_user ;;
+    "disable --user")  cmd_disable_user ;;
     --verify-rootless)      verificar_rootless && { echo "rootless-verificado"; exit 0; } || { echo "rootless-no-disponible"; exit 1; } ;;
     "")  uso; echo "ERROR: falta el subcomando" >&2; exit 2 ;;
     *)   uso; echo "ERROR: subcomando desconocido: $1" >&2; exit 2 ;;

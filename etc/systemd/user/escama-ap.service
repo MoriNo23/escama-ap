@@ -1,0 +1,27 @@
+[Unit]
+Description=escama AP (modo usuario) - hostapd + dnsmasq sin sudo
+Documentation=file:/opt/escama/README.md
+# Unit de USUARIO: se habilita con `install.sh enable --user` y arranca al
+# iniciar sesion, sin privileged unit de sistema (spec `uso-sin-privilegios`).
+#
+# Por que el launcher: el kernel ignora las file capabilities en scripts con
+# shebang, asi que /opt/escama/escama-launch es un binario ELF con
+# CAP_NET_ADMIN/RAW/BIND_SERVICE que se las pasa al Python via el set ambient.
+# Invocar el Python directo NO tendria las capabilities.
+#
+# network-online.target NO se usa: es un target de sistema y una unit de
+# usuario no puede ordenarse contra el. El AP no necesita internet para
+# arrancar: levanta su propia red y el egress se resuelve despues.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/escama/escama-launch core start
+ExecStop=/opt/escama/escama-launch core stop
+Restart=on-failure
+RestartSec=10
+# El watcher de egress corre como user service aparte (escama-egress-user.service).
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

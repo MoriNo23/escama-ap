@@ -48,9 +48,9 @@ VERSION = _read_version()
 
 # --- Paths ---
 CONFIG_DIR = "/etc/escama"
+# Config del usuario: SIEMPRE en /etc y de SOLO LECTURA para el proceso. Es la
+# unica fuente de verdad (ver AGENTS.md) y nunca la regenera el nucleo.
 ENV_FILE = os.path.join(CONFIG_DIR, "escama.env")
-HOSTAPD_CONF = "/etc/hostapd/hostapd-escama.conf"
-DNSMASQ_CONF = "/etc/dnsmasq-escama.conf"
 
 
 # --- Rutas de runtime (spec `uso-sin-privilegios`, design D3) ---
@@ -90,6 +90,41 @@ def _log_path() -> str:
     return os.path.join(d, "escama-ap.log")
 
 
+def _config_dir() -> str:
+    """Directorio de los confs GENERADOS: /etc con root, XDG_CONFIG_HOME sin root.
+
+    Los confs de hostapd y dnsmasq son artefactos que genera `genconfig` a partir
+    de escama.env, no configuracion del usuario (esa es ENV_FILE, de solo
+    lectura). Por eso van a /etc solo cuando hay privilegio: escribir en
+    /etc/hostapd sin CAP_DAC_OVERRIDE aborta el arranque con PermissionError,
+    y sin elAP rootless no tendria con que arrancar. hostapd y dnsmasq toman
+    la ruta del conf por argumento, asi que el conf de usuario funciona igual.
+    """
+    if os.geteuid() == 0:
+        return "/etc"
+    d = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    d = os.path.join(d, "escama")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        d = os.path.join("/tmp", f"escama-{os.geteuid()}")
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _hostapd_conf() -> str:
+    if os.geteuid() == 0:
+        return "/etc/hostapd/hostapd-escama.conf"
+    return os.path.join(_config_dir(), "hostapd-escama.conf")
+
+
+def _dnsmasq_conf() -> str:
+    if os.geteuid() == 0:
+        return "/etc/dnsmasq-escama.conf"
+    return os.path.join(_config_dir(), "dnsmasq-escama.conf")
+
+
 def _lease_path() -> str:
     """Leasefile de dnsmasq: /var/lib/misc con root, dir de runtime sin root.
 
@@ -103,6 +138,8 @@ def _lease_path() -> str:
 
 LOG = _log_path()
 LEASE_FILE = _lease_path()
+HOSTAPD_CONF = _hostapd_conf()
+DNSMASQ_CONF = _dnsmasq_conf()
 PIDFILE = os.path.join(_runtime_dir(), "dnsmasq-escama.pid")
 STATE_FILE = os.path.join(_runtime_dir(), "escama-egress.state")
 
@@ -804,7 +841,9 @@ wpa_key_mgmt=WPA-PSK
 wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 """
-    os.makedirs(os.path.dirname(HOSTAPD_CONF), exist_ok=True)
+    # Con root va a /etc/hostapd/; sin root a ~/.config/escama/ (ver
+    # _config_dir). El dir se crea en ambos casos.
+    os.makedirs(os.path.dirname(HOSTAPD_CONF) or ".", exist_ok=True)
     with open(HOSTAPD_CONF, "w") as f:
         f.write(hostapd)
 
@@ -826,6 +865,9 @@ dhcp-leasefile={LEASE_FILE}
             if 0 < mtu < 1500:
                 # los clientes negocian MTU del tunnel -> nada de PMTU roto
                 dnsmasq += f"dhcp-option=option:mtu,{mtu}\n"
+    # Sin root el conf cae en ~/.config/escama (ver _config_dir): el dir lo
+    # crea _config_dir(), pero se asegura igual por si se monkeypatcheo la ruta.
+    os.makedirs(os.path.dirname(DNSMASQ_CONF) or ".", exist_ok=True)
     with open(DNSMASQ_CONF, "w") as f:
         f.write(dnsmasq)
 
@@ -1022,6 +1064,8 @@ def do_status() -> int:
     print(f"Modo:        {'root' if os.geteuid() == 0 else 'rootless (sin sudo)'}")
     print(f"Log:         {LOG}")
     print(f"Pidfile:     {PIDFILE}")
+    print(f"hostapd:     {HOSTAPD_CONF}")
+    print(f"dnsmasq:     {DNSMASQ_CONF}")
     return 0
 
 

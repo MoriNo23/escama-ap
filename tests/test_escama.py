@@ -1533,3 +1533,73 @@ def test_motivo_fallo_incluye_el_stderr_real():
     assert "rmmod 8192eu" in m
     assert "Failed to open file" in m
     assert "linea2" not in m, "solo la primera linea del error"
+
+
+# ---------------------------------------------------------------------------
+# Confs GENERADOS en ruta de usuario sin root (spec `uso-sin-privilegios`:
+# "Mutar sin sudo en modo rootless" exige que el arranque no escriba en /etc)
+# ---------------------------------------------------------------------------
+
+def test_hostapd_conf_va_a_etc_con_root(monkeypatch):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    assert escama._hostapd_conf() == "/etc/hostapd/hostapd-escama.conf"
+
+
+def test_hostapd_conf_va_a_xdg_sin_root(monkeypatch, tmp_path):
+    """Escribir en /etc/hostapd sin CAP_DAC_OVERRIDE aborta con
+    PermissionError: el modo rootless no tendria con que arrancar."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    p = escama._hostapd_conf()
+    assert p.startswith(str(tmp_path / "cfg")), p
+    assert "hostapd-escama.conf" in p
+
+
+def test_dnsmasq_conf_va_a_etc_con_root(monkeypatch):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    assert escama._dnsmasq_conf() == "/etc/dnsmasq-escama.conf"
+
+
+def test_dnsmasq_conf_va_a_xdg_sin_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    p = escama._dnsmasq_conf()
+    assert p.startswith(str(tmp_path / "cfg")), p
+
+
+def test_env_file_siempre_en_etc(monkeypatch):
+    """La config del usuario NUNCA se mueve: es la fuente de verdad y solo se
+    lee. Moverla romperia el contrato documentado en AGENTS.md."""
+    assert escama.ENV_FILE == "/etc/escama/escama.env"
+
+
+def test_config_dir_cae_a_tmp_si_no_se_puede_crear(monkeypatch):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/proc/no-escribible/x")
+    d = escama._config_dir()
+    assert d.startswith("/tmp"), d
+
+
+def test_genconfig_escribe_en_la_ruta_del_usuario(monkeypatch, tmp_path):
+    """End-to-end del arranque rootless: generar los confs sin privilege debe
+    funcionar y no tocar /etc."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setattr(escama, "HOSTAPD_CONF", escama._hostapd_conf())
+    monkeypatch.setattr(escama, "DNSMASQ_CONF", escama._dnsmasq_conf())
+    monkeypatch.setattr(escama, "_read_state", lambda: {})
+    monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "")
+    monkeypatch.setattr(escama, "iface_mtu", lambda i: 1500)
+    cfg = {
+        "AP_IFACE": "stonepi", "WAN_IFACE": "wn8200nd", "SSID": "escama",
+        "CHANNEL": "1", "HW_MODE": "g", "AP_IP": "10.42.1.1",
+        "AP_CIDR": "24", "AP_SUBNET": "10.42.1.0/24", "DHCP_START": "10.42.1.10",
+        "DHCP_END": "10.42.1.254", "DHCP_LEASE": "12h", "WPA_PASSPHRASE": "x",
+        "DNS1": "8.8.8.8", "DNS2": "8.8.4.4", "LEASE_FILE": str(tmp_path / "l"),
+    }
+    escama.generar_hostapd(cfg)
+    escama.generar_dnsmasq(cfg)
+    assert (tmp_path / "cfg" / "escama" / "hostapd-escama.conf").is_file()
+    assert (tmp_path / "cfg" / "escama" / "dnsmasq-escama.conf").is_file()
+    txt = (tmp_path / "cfg" / "escama" / "hostapd-escama.conf").read_text()
+    assert "ssid=escama" in txt
