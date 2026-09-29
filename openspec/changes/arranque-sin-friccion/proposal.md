@@ -81,11 +81,16 @@ Hoy el programa tiene tres fricciones de uso, todas verificadas en la máquina:
 - **Sistemas**: capabilities sobre un binario, unit de usuario bajo
   `~/.config/systemd/user/`, permisos de `/opt/escama` y `/etc/escama`.
 - **Riesgo principal (actualizado tras la investigación)**: la viabilidad del
-  rootless **quedó verificada empíricamente** — la receta `setcap +ep` + `capset`
-  al inheritable + `PR_CAP_AMBIENT_RAISE` conserva las capabilities a través del
-  `execve` y habilita `iptables`, `ip` y el bind en puertos privilegiados como
-  usuario normal (ver `design.md` D2). Riesgo residual: que la máquina destino
-  tenga compilador y soporte de xattrs; sin ellos el preflight MUST negar el modo
-  rootless y ofrecer el camino de elevación documentado, nunca fingir que
-  funciona. El paso de compilación sigue siendo la desviación consciente de
-  "sin build step" (AGENTS.md) y queda explícito en `design.md`.
+  rootless **quedó verificada empíricamente** — la receta `setcap +ep` +
+  `capset()` al inheritable + `prctl(PR_CAP_AMBIENT_RAISE)` conserva las
+  capabilities a través del `execve` y habilita `iptables`, `ip` y
+  `sysctl ip_forward` como usuario normal (`Prm=Amb=0x3400` post-`execve`;
+  ver `design.md` D2). La investigación además **descubrió cuatro condiciones de
+  falla silencioso** que el diseño ahora exige verificar: tmpfs no aplica file
+  capabilities (aunque `getcap` las muestre), `chown` borra la xattr, un owner
+  incorrecto hace que el kernel descarte las caps, y la libcap 2.75 de Debian
+  tiene `cap_set_ambient` roto (por eso el launcher usa syscalls crudos).
+  Riesgo residual: que la máquina destino tenga compilador y el FS con xattrs;
+  sin ellos el preflight MUST negar el modo rootless y ofrecer el camino de
+  elevación documentado, nunca fingir que funciona. El paso de compilación sigue
+  siendo la desviación consciente de "sin build step" (AGENTS.md).

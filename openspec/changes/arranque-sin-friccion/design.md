@@ -52,50 +52,63 @@ mantener. Se elige (fuente única + disciplina manual + CHANGELOG) por ser
 simple y determinista; el CHANGELOG MUST cubrir también la serie 0.x para que el
 historial no arranque vacío.
 
-**D2 — Rootless real = launcher ELF con `setcap +ep`, que suma las capabilities
-al set inheritable con `capset()` y las eleva a ambient antes de `execv` del
-núcleo; el modo sudo actual se conserva como camino válido.**
-El kernel ignora file capabilities sobre scripts con shebang, así que el rootless
-de `ip`/`iptables`/`hostapd` exige un binario. La receta sale de `capabilities(7)`
-y fue verificada end-to-end en esta máquina (`iptables -L` rc=0, `ip link add`
-rc=0, bind en puerto 80 OK, todo como usuario normal):
+**D2 — Rootless real = launcher ELF con `setcap +ep` que, con **syscalls crudos**
+(`capset` + `prctl(PR_CAP_AMBIENT_RAISE)`), pasa las capabilities al proceso
+Python vía el set **ambient**; el modo sudo actual se conserva como camino
+válido.**
+El kernel ignora file capabilities sobre scripts con shebang (`execve(2)`), así
+que el rootless de `ip`/`iptables`/`hostapd` exige un binario. Receta, cada paso
+con su regla y **verificada end-to-end en esta máquina** (`Prm=Amb=0x3400`
+post-`execve`; `iptables -t nat -L -n` rc=0, `ip link add` rc=0,
+`sysctl net.ipv4.ip_forward=1` rc=0, todo como usuario normal sin sudo):
 
-- `setcap cap_net_admin,cap_net_raw,cap_net_bind_service+ep` sobre el launcher
-  (`escama-launch`, C diminuto compilado por `install.sh`).
-- El launcher suma esas caps a su set **inheritable** con `capset()`. Necesario
-  porque en `execve` el inheritable **no** se toma del archivo
-  (`P'(inheritable) = P(inheritable)`, capabilities(7) §"Transformation of
-  capabilities during execve()"), así que `setcap +ei` no aporta nada para un
-  usuario normal cuyo inheritable está vacío. Sumar al inheritable está
-  permitido sin `CAP_SETPCAP` porque el nuevo set es subconjunto del permitted
-  (capabilities(7) §"Programmatically adjusting capability sets").
-- El launcher las eleva a **ambient** con `PR_CAP_AMBIENT_RAISE`, por el
-  invariante "ninguna cap puede ser ambient si no está en permitted **e**
-  inheritable" (capabilities(7) §Ambient). El ambient sobrevive al `execve` de un
-  binario no privilegiado y se suma al permitted del proceso siguiente: el núcleo
-  Python queda con las tres capabilities.
-- **Condición operational verificada**: el launcher MUST ser propiedad del
-  usuario que lo ejecuta. Con el binario en root el kernel lo trata como
-  *capability-dumb binary* y **descarta las capabilities en silencio**
-  (capabilities(7) §"Safety checking for capability-dumb binaries"): `getcap`
-  sigue mostrando las caps y el fallo es invisible. El preflight MUST verificar
-  el owner además de las capabilities.
-- El `preflight` verifica *antes* de prometer nada: toolchain, xattrs del FS
-  destino, owner del launcher, `setcap` efectivo **y** una operación de red real
-  a través del `execve`. Si algo falta, el modo rootless se **niega** con el
-  motivo y el proyecto sigue operable con el modo sudo actual (no se
-  desinstala ni se rompe nada existente).
+1. `setcap cap_net_admin,cap_net_raw,cap_net_bind_service+ep` sobre el launcher
+   (`escama-launch`, C diminuto compilado por `install.sh`).
+2. El launcher suma esas caps a su set **inheritable** con `capset()`. Necesario
+   porque en `execve` el inheritable **no** se toma del archivo
+   (`P'(inheritable) = P(inheritable)`, capabilities(7) §"Transformation of
+   capabilities during execve()"), de modo que `setcap +ei` no aporta nada para
+   un usuario normal cuyo inheritable está vacío. Sumarlo está permitido sin
+   `CAP_SETPCAP` porque el nuevo set es subconjunto del permitted
+   (capabilities(7) §"Programmatically adjusting capability sets").
+3. El launcher las eleva a **ambient** con `prctl(PR_CAP_AMBIENT_RAISE)`, por el
+   invariante "ninguna cap puede ser ambient si no está en permitted **e**
+   inheritable" (capabilities(7) §Ambient; `PR_CAP_AMBIENT(2const)`). El ambient
+   sobrevive al `execve` de un binario no privilegiado y se suma al permitted del
+   proceso siguiente.
+4. **Syscalls crudos, no libcap.** La libcap 2.75 de Debian 13 tiene
+   `cap_set_ambient(cap, valor)` con un `cap_flag_value_t` propio cuyo valor de
+   RAISE es **0**, no el opcode 2 de `prctl`; y aun pasándole 0 devuelve éxito
+   sin efectivamente elevar el ambient (medido: `cap_get_ambient` sigue en 0 tras
+   un "raise" exitoso). El launcher MUST usar `capset()`/`prctl()` directos.
+5. **Condiciones operational verificadas** (el preflight MUST comprobarlas):
+   - **Filesystem**: las file capabilities solo funcionan en el FS del launcher.
+     En **tmpfs no se aplican** aunque `getcap` las muestre: medido `prm=0x0` en
+     `/tmp` vs `prm=0x3400` en ext4. `/opt` en la máquina destino es ext4 → OK;
+     el preflight MUST verificar el FS, no solo que `setcap` no falló.
+   - **Owner**: el launcher MUST ser del usuario que lo ejecuta. Con el binario
+     en root el kernel lo trata como *capability-dumb binary* y **descarta las
+     caps en silencio** (capabilities(7) §"Safety checking for capability-dumb
+     binaries"); `getcap` sigue mostrándolas. Además, **`chown` borra la xattr**
+     `security.capability`: `install.sh` MUST hacer `chown` **antes** de
+     `setcap`, nunca al revés (medido: `setcap` → `chown` deja el binario sin caps).
+   - **Orden de bootstrap**: la primera exec del launcher no puede conservar
+     caps si el objetivo tiene file capabilities (el kernel limpia el ambient al
+     ejecutar un archivo "privilegiado"); el núcleo Python no las tiene, por eso
+     el链 funciona.
+6. El `preflight` verifica *antes* de prometer nada: toolchain, FS con soporte de
+   xattrs, owner, `setcap` efectivo **y** una operación de red real a través del
+   `execve`. Si algo falta, el modo rootless se **niega** con el motivo y el
+   proyecto sigue operable con el modo sudo actual.
 *Alternativas descartadas*: (a) `cap_net_admin+ep` sobre `/usr/bin/python3` →
 otorga las capabilities a *todo* script de Python del sistema: inaceptable;
 (b) `AmbientCapabilities=` de systemd → sirve para una unit de sistema, pero
 descartado como mecanismo del CLI interactivo: un user manager no puede elevar
 el bounding set por encima del suyo (misma limitación que systemd documenta para
-`Limit*` en user units), así que solo resolvería el arranque por servicio y
-dejaría el CLI igual; (c) `sudo` NOPASSWD para un subconjunto de binarios →
-sigue siendo root, no es rootless (el usuario pidió rootless real). Coste
-asumido: un paso de compilación, que es la desviación consciente de "sin build
-step"; por eso el preflight lo trata como condición de primera clase y el
-fallback (sudo) es un modo soportado, no un plan B de emergencia.
+`Limit*` en user units), así que solo resolvería el arranque por servicio;
+(c) `sudo` NOPASSWD → sigue siendo root, no es rootless. Coste asumido: un paso
+de compilación, desviación consciente de "sin build step"; el preflight lo trata
+como condición de primera clase y el fallback (sudo) es un modo soportado.
 
 **D3 — Estado de runtime en rutas del usuario; las de sistema solo si hay
 privilegio.**
@@ -135,13 +148,24 @@ versión.
 
 ## Risks / Trade-offs
 
+- [Condiciones de file capabilities verificadas empíricamente, no asumidas] →
+  (a) **tmpfs no las aplica** aunque `getcap` las muestre (`prm=0x0` en `/tmp` vs
+  `0x3400` en ext4): el launcher MUST vivir en el FS de `/opt` (ext4) y el
+  preflight MUST verificar el FS; (b) **`chown` borra la xattr**
+  `security.capability`: `install.sh` MUST ordenar `chown` antes de `setcap`;
+  (c) **owner incorrecto → las caps se descartan en silencio**
+  (*capability-dumb binary*): el preflight MUST verificar owner además de caps;
+  (d) **libcap 2.75 de Debian está roto para ambient** (`cap_set_ambient` con su
+  valor propio 0 devuelve éxito sin elevar; con el opcode 2 del kernel da EINVAL):
+  el launcher MUST usar `capset()`/`prctl()` crudos. Cada una es un modo de
+  fallo silencioso que `getcap` no delata.
 - [Capabilities requieren toolchain y FS con xattrs; stonepi puede no tener gcc]
   → preflight lo detecta y niega el modo con motivo; el modo sudo (actual)
   queda siempre soportado. Primera tarea de implementación: verificar gcc/xattr
   en la máquina destino antes de invertir en el resto.
 - [Un binario con `cap_net_admin` es superficie de ataque si el usuario lo
   ejecuta a diario] → el launcher no acepta argumentos propios ni hace otra cosa
-  que `exec` del núcleo; se documenta la987863 superficie.
+  que `exec` del núcleo; se documenta la superficie.
 - [Execve del launcher puede perder capabilities salvo que se preserven
   (inheritable/ambient)] → el launcher las preserva explícitamente y el preflight
   *verifica de verdad* (ejecuta una operación real) que sobreviven al exec, no
