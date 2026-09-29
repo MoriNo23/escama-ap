@@ -116,8 +116,13 @@ def read_version() -> str:
 
     Misma busqueda que escama.py: el directorio del script y su padre, para
     funcionar tanto desde el repo como desde /opt/escama.
+
+    realpath, NO abspath: install.sh symlinkea /usr/local/bin/escama-tui ->
+    /opt/escama/escama-tui.py, y con abspath se buscaria VERSION subiendo desde
+    /usr/local/bin, donde no esta: el resultado seria "desconocido" justo en el
+    comando que el usuario ejecuta.
     """
-    aqui = os.path.dirname(os.path.abspath(__file__))
+    aqui = os.path.dirname(os.path.realpath(__file__))
     d = aqui
     for _ in range(4):  # script dir + hasta 3 niveles hacia la raiz del repo
         try:

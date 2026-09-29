@@ -27,8 +27,9 @@ import re
 # install.sh deja una copia del VERSION al lado del core.
 # Ningun ejecutable guarda una copia literal. Si no se encuentra, degrada a
 # "desconocido": es preferible a mentir con un numero viejo.
-def _read_version() -> str:
-    d = os.path.dirname(os.path.abspath(__file__))
+def _leer_version_desde(ruta_script: str) -> str:
+    """Sube desde el directorio de `ruta_script` buscando VERSION (max 4 niveles)."""
+    d = os.path.dirname(ruta_script)
     for _ in range(4):  # script dir + hasta 3 niveles hacia la raiz
         try:
             with open(os.path.join(d, "VERSION")) as f:
@@ -42,6 +43,14 @@ def _read_version() -> str:
             break
         d = padre
     return "desconocido"
+
+
+def _read_version() -> str:
+    # realpath, NO abspath: install.sh symlinkea /usr/local/bin/escama ->
+    # /opt/escama/escama.py. Con abspath se buscaria VERSION subiendo desde
+    # /usr/local/bin (-> /usr/local -> /usr -> /) y no se encontraria nunca,
+    # dando "desconocido" justamente en el comando que el usuario ejecuta.
+    return _leer_version_desde(os.path.realpath(__file__))
 
 
 VERSION = _read_version()

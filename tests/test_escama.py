@@ -817,7 +817,27 @@ def test_do_egress_no_reescribe_hostapd(monkeypatch, tmp_path):
 # Versionado (spec `versionado`): fuente única + coherencia entre las piezas
 # ---------------------------------------------------------------------------
 
-RAIZ_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+def _raiz_de_repo() -> str:
+    """Raiz del repo real, subiendo hasta encontrar VERSION + el core.
+
+    No se puede asumir `dirname(__file__)/..`: mutmut copia la suite a
+    `mutants/tests/`, y ahi `..` es `mutants/`, que no tiene VERSION. Se
+    distingue la raiz de verdad porque es el unico directorio que tiene a la vez
+    el archivo VERSION y opt/escama/escama.py.
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(5):
+        if (os.path.isfile(os.path.join(d, "VERSION"))
+                and os.path.isfile(os.path.join(d, "opt", "escama", "escama.py"))):
+            return d
+        padre = os.path.dirname(d)
+        if padre == d:
+            break
+        d = padre
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+RAIZ_REPO = _raiz_de_repo()
 # euid real capturado antes de cualquier monkeypatch de os.geteuid:
 # patchearlo con un lambda que lo vuelve a leer causa recursion.
 _EUID = os.geteuid()
@@ -1603,3 +1623,44 @@ def test_genconfig_escribe_en_la_ruta_del_usuario(monkeypatch, tmp_path):
     assert (tmp_path / "cfg" / "escama" / "dnsmasq-escama.conf").is_file()
     txt = (tmp_path / "cfg" / "escama" / "hostapd-escama.conf").read_text()
     assert "ssid=escama" in txt
+
+
+def test_version_se_lee_a_traves_de_un_symlink(monkeypatch, tmp_path):
+    """install.sh symlinkea /usr/local/bin/escama -> /opt/escama/escama.py.
+
+    Con abspath(__file__) la busqueda sube desde /usr/local/bin y nunca ve el
+    VERSION de /opt/escama: el usuario que ejecuta `escama --version` (el comando
+    que el propio install.sh crea) recibia "desconocido".
+    """
+    opt = tmp_path / "opt" / "escama"
+    opt.mkdir(parents=True)
+    (opt / "VERSION").write_text("9.9.9\n")
+    core = opt / "escama.py"
+    core.write_text("# copia simulada\n")
+    bin_dir = tmp_path / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True)
+    link = bin_dir / "escama"
+    link.symlink_to(core)
+    # Con abspath (lo que hacia antes) esto daba "desconocido"; con realpath
+    # se resuelve el symlink y se encuentra el VERSION de al lado del core.
+    monkeypatch.setattr(escama, "__file__", str(link))
+    assert escama._read_version() == "9.9.9"
+
+
+def test_version_degrada_sin_hay_VERSION(tmp_path):
+    """Sin VERSION debe degradar a 'desconocido', nunca a un numero viejo."""
+    lonely = tmp_path / "sin" / "version" / "escama.py"
+    lonely.parent.mkdir(parents=True)
+    lonely.write_text("# nada\n")
+    assert escama._leer_version_desde(str(lonely)) == "desconocido"
+
+
+def test_tui_usa_realpath_para_no_perder_la_version():
+    """El mismo bug en escama-tui.py: sin realpath degradaba a desconocido."""
+    import importlib.util
+    ruta = os.path.join(RAIZ_REPO, "opt", "escama", "escama-tui.py")
+    src = open(ruta).read()
+    assert "os.path.realpath(__file__)" in src, (
+        "escama-tui debe resolver la version con realpath para funcionar via symlink")
+    assert "os.path.abspath(__file__)" not in src, (
+        "abspath rompe la busqueda de VERSION cuando el comando se invoca por symlink")

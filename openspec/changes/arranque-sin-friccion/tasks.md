@@ -55,8 +55,8 @@
 ## 6. Fase 3 — QA y cierre
 
 - [ ] 6.1 Suite completa con path explícito + `mutmut run`; tests nuevos verdes y mutantes del código nuevo killed o documentados. Verificar: `python3 -m pytest tests/test_escama.py -q` en verde y mutmut sin regresiones relevantes
-- [ ] 6.2 Documentar en `README.md`: versión/changelog, preflight, rootless vs sudo, unit de usuario. Verificar: secciones presentes
-- [ ] 6.3 Verificación end-to-end del camino rootless en esta máquina: instalar, preflight en verde, y `status`/`restart` ejecutados **sin sudo** con éxito real. Verificar: los tres comandos corrieron sin sudo
+- [x] 6.2 Documentar en `README.md`: versión/changelog, preflight, rootless vs sudo, unit de usuario. Verificar: secciones presentes — **hecho**: secciones `Versionado`, `Preflight`, `Rootless vs sudo: dos modos, mismo núcleo` (con tabla de qué cubre cada modo) y `Unit de usuario (autostart sin sudo)`; mapa de arquitectura actualizado (launcher, user units, rutas de confs según modo) y cifras de tests corregidas (45→105)
+- [x] 6.3 Verificación end-to-end del camino rootless en esta máquina: instalar, preflight en verde, y `status`/`restart` ejecutados **sin sudo** con éxito real. Verificar: los tres comandos corrieron sin sudo — **hecho y medido**: `preflight` (rootless DISPONIBLE verificado con operación real), `status` (muestra modo rootless + rutas efectivas) y `restart` (AP levanta) sin sudo. Además: cliente simulado en namespace迫 sale a Internet y el contador de `MASQUERADE` sube 0→1, probando que el NAT aplicado por el proceso rootless funciona de verdad; y las user units `enabled`+`active` levantan el AP con la unit de sistema deshabilitada
 - [ ] 6.4 Commit final por tipo + bump minor de versión + entrada de CHANGELOG de este change. Verificar: los tres `--version` muestran la versión nueva y el CHANGELOG tiene la entrada
 
 ## 7. Externo — stonepi (cuando el change se aplique en esa máquina)

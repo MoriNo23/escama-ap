@@ -13,22 +13,26 @@ Consolidado de 6 scripts bash sueltos → **1 librería Python + 1 TUI**. Menos 
 única fuente de verdad.
 
 ```
-opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig|egress|watch
+opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig|egress|watch|preflight
+opt/escama/escama-launch.c  # launcher ELF rootless (capabilities → núcleo); se compila a /opt/escama/escama-launch
 opt/escama/escama-tui.py    # TUI (whiptail): edita escama.env y regenera confs
 etc/escama/escama.env       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID, etc.)
-etc/hostapd/hostapd-escama.conf    # generado desde escama.env (no editar a mano)
-etc/dnsmasq-escama.conf           # generado desde escama.env (no editar a mano)
+etc/hostapd/hostapd-escama.conf    # generado (con root) — sin root: ~/.config/escama/hostapd-escama.conf
+etc/dnsmasq-escama.conf           # generado (con root) — sin root: ~/.config/escama/dnsmasq-escama.conf
 etc/systemd/system/escama-ap.service      # ExecStart=/opt/escama/escama.py start
 etc/systemd/system/escama-egress.service  # watcher VPN: escama.py watch 5
-tests/test_escama.py        # 45 unit tests (mock de system calls, no toca el sistema)
+etc/systemd/user/escama-ap.service        # autostart sin sudo (rootless) al iniciar sesión
+etc/systemd/user/escama-egress.service    # watcher VPN en modo rootless
+tests/test_escama.py        # 102 unit tests (mock de system calls, no toca el sistema)
 setup.cfg                   # config de mutmut (mutation testing)
-install.sh                  # ciclo de vida: install|uninstall|enable|disable|status
+install.sh                  # ciclo de vida: install|uninstall|enable|disable|status|enable --user
 ```
 
 Instalación y autostart: `sudo ./install.sh install|enable|disable|uninstall` y
 `./install.sh status` — crea los symlinks de `escama`/`escama-tui` en
 `/usr/local/bin/`, instala los units y **nunca pisa tu `escama.env`** (las
-novedades quedan al lado, en `escama.env.new`).
+novedades quedan al lado, en `escama.env.new`). También instala las user units
+(rootless) sin habilitarlas: eso es `install.sh enable --user`.
 
 ## Diseño anti-errores (por qué no se rompe solo)
 
@@ -69,9 +73,54 @@ sudo escama.py genconfig     # regenera hostapd/dnsmasq confs desde escama.env
 sudo escama.py egress        # re-evalua salida VPN/WAN sin tirar el AP
 sudo escama.py egress vpn    # forzar salida por tunnel (auto|vpn|wan|<iface>)
 sudo escama.py watch         # loop: sigue el tunnel y reaplica NAT solo
+escama preflight             # comprueba la maquina (componentes, version, rootless viable)
 
 sudo escama-tui              # menú interactivo (whiptail) para editar escama.env
 ```
+
+## Versionado
+
+`VERSION` (en la raíz del repo) es la **única fuente de la versión**: la leen en
+runtime `escama.py`, `escama-tui.py` e `install.sh`. No está hardcodeada en ningún
+ejecutable. El historial completo está en [`CHANGELOG.md`](CHANGELOG.md).
+
+```bash
+escama.py --version      # o -v / version
+```
+
+## Preflight
+
+`escama preflight` comprueba **antes de operar** que la máquina tiene lo necesario:
+componentes del sistema, versión del repo frente a la instalada en `/opt/escama`, y
+si el modo rootless es viable. No toca nada.
+
+```bash
+escama preflight        # sin sudo
+sudo escama.py preflight
+```
+
+## Rootless vs sudo: dos modos, mismo núcleo
+
+**Modo con privilegio** (el histórico): `sudo escama.py start`. Todo pasa por root.
+
+**Modo rootless** (sin sudo): el launcher `/opt/escama/escama-launch` es un binario
+ELF con `CAP_NET_ADMIN`, `CAP_NET_RAW` y `CAP_NET_BIND_SERVICE`, y se las pasa al
+Python. Hace falta un ELF porque **el kernel ignora las file capabilities en scripts
+con shebang**. Solo cubre operaciones de red: escribir en `/etc` sigue necesitando
+privilegio, y lo que no puede hacer rootless **degrada con un mensaje explícito**
+(recargar el módulo del driver necesita `CAP_SYS_MODULE`; quitarle la interfaz a
+NetworkManager necesita autorización de NM).
+
+| | con sudo | rootless |
+|---|---|---|
+| Red (hostapd, NAT, rutas, sysctl) | ✅ | ✅ vía el launcher |
+| Autostart | unit de sistema | unit de usuario |
+| Log | `/var/log/escama-ap.log` | `~/.local/state/escama/escama-ap.log` |
+| Confs generados | `/etc/{hostapd,dnsmasq}…` | `~/.config/escama/` |
+| Recargar módulo del driver | ✅ | ❌ degrada con motivo |
+
+`status` muestra siempre el modo y las rutas efectivas, para no confundir "no
+arrancó" con "no tengo permiso".
 
 ## systemd
 
@@ -79,6 +128,24 @@ sudo escama-tui              # menú interactivo (whiptail) para editar escama.e
 sudo ./install.sh enable      # arranca al boot + ahora (escama-ap + escama-egress)
 sudo ./install.sh disable      # NO arranca al boot + detiene ahora
 sudo ./install.sh status      # estado por componente (units, symlinks, env)
+```
+
+### Unit de usuario (autostart sin sudo)
+
+Arranca el AP **al iniciar sesión**, sin privileged unit de sistema:
+
+```bash
+sudo ./install.sh enable --user     # instala y habilita las user units
+sudo ./install.sh disable --user    # y para deshabilitarlas
+```
+
+Se instalan en `~/.config/systemd/user/`. `enable --user` **verifica el modo rootless
+antes de habilitar**: si no verifica, no deja un unit que falla al iniciar sesión.
+Ambos modos pueden convivir, pero solo uno debe estar habilitado a la vez.
+
+```bash
+systemctl --user status escama-ap.service
+journalctl --user -u escama-ap.service -f
 ```
 Equivale a `systemctl enable/disable --now` sobre los units instalados, con
 tolerancia a los que falten en esa máquina.
@@ -115,8 +182,8 @@ y su motivo quedan en el log (`/var/log/escama-ap.log`).
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 45 tests (SIEMPRE el path explícito)
-python3 -m mutmut run                        # mutation testing (lee setup.cfg)
+python3 -m pytest tests/test_escama.py -q   # 102 tests (SIEMPRE el path explícito)
+~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
 ```
 NO corras `python3 -m pytest` sin el path: `mutants/tests/` tiene el mismo
 basename y rompe la colección (pitfall documentado en AGENTS.md).
