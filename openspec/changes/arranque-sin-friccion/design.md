@@ -146,6 +146,45 @@ dos implementaciones que divergen; descartada (spec MUST NOT duplicar).
 ser por-acción, no global. Sin tocar el flujo de la TUI más allá del gate y la
 versión.
 
+**D7 — QA en CI: GitHub Actions con dos jobs, separando lo rápido de lo caro.**
+La suite corre sola en cada push/PR a `master`; mutmut corre aparte, manual,
+porque sus ~2.200 mutantes tardan más de media hora y su resultado es de
+tendencia, no de gate. La regla de este change (investigar antes de armar)
+aplica también acá: la decisión se tomó contra la documentación oficial de
+GitHub, no contra hábitos copiados de otros repos.
+
+- El workflow vive en `.github/workflows/ci.yml`: los workflows solo pueden
+  vivir en `.github/workflows/` con extensión `.yml`/`.yaml`
+  (fuente: GitHub Docs, *Workflow syntax for GitHub Actions*,
+  docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions).
+- Job `tests`: se dispara con `on: [push, pull_request]` (una sola de las dos
+  basta) y filtro `branches: [master]` para push, que es la rama del repo
+  (misma fuente, secciones `on.<push>` y `on.<pull_request>`). Fija el
+  intérprete con `actions/setup-python` y `python-version: '3.13'` —la versión
+  del repo (`setup.cfg`); es la forma recomendada de fijar Python en Actions
+  porque garantiza comportamiento consistente entre runners (fuente: GitHub
+  Docs, *Building and testing Python*,
+  docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python).
+  Instala `pytest` con pip (misma fuente, sección *Installing dependencies*) y
+  corre **siempre** `python3 -m pytest tests/test_escama.py -q` con el path
+  explícito: `mutants/tests/` comparte basename con la suite y rompe la
+  colección (pitfall documentado en AGENTS.md).
+- Job `mutmut`: `on.workflow_dispatch` (disparo manual; este evento solo
+  funciona con el workflow en la rama default — misma fuente, sección
+  `on.workflow_dispatch`), instalando `mutmut` por pip; `mutmut run` lee el
+  `setup.cfg` del repo. Opcional sumarle `on.schedule` con cron POSIX si se
+  quiere tendencia semanal (misma fuente, sección `on.schedule`). No va como
+  gate de push/PR: su costo en minutos no justifica bloquear cada commit.
+- Por qué la suite es segura en un runner ajeno: no basta con que mockee
+  `run()`/`os` — desde este change un fixture `autouse` bloquea `subprocess`
+  durante TODA la suite, así que un test que se filtre falla con el comando que
+  intentó ejecutar, en vez de tocar el runner. Lo verificó este change al cazar
+  una sonda real de `rootless_disponible()` que se había filtrado. La suite es
+  inofensiva por construcción, no por convención.
+- Fuera de scope: ni cobertura publicada como artefacto ni publish a PyPI (no
+  es un paquete, es un repo de sistema); el mutation testing sigue
+  local-first.
+
 ## Risks / Trade-offs
 
 - [Condiciones de file capabilities verificadas empíricamente, no asumidas] →

@@ -43,6 +43,11 @@ Hoy el programa tiene tres fricciones de uso, todas verificadas en la máquina:
   estado de runtime (pidfile, logs) en rutas del usuario; y autostart con una
   **unit de usuario** (`systemctl --user`), sin privileged unit. Los read-only
   (`status`, `--help`, `--version`) funcionan sin privilegios desde el arranque.
+- **QA en CI**: la suite de tests corre sola en GitHub Actions en cada push/PR a
+  `master` (job `tests`, ~25 s), y el mutation testing queda como job manual
+  (`mutmut`, separado porque tarda 30+ min y es tendencia, no gate). La suite es
+  segura en un runner ajeno por construcción: un fixture `autouse` bloquea
+  `subprocess` en toda la suite.
 - **Fuera de scope deliberado**: no se toca la lógica de egress/VPN ni la de
   selección de canal (ya especificadas en `seleccion-canal` e `instalacion`);
   `instalacion` conserva sus requisitos actuales (el instalador sigue siendo la
@@ -72,7 +77,8 @@ Hoy el programa tiene tres fricciones de uso, todas verificadas en la máquina:
   por subcomando), `opt/escama/escama-tui.py` (gate coherente), `install.sh`
   (deja de duplicar la versión; instala capabilities y la unit de usuario).
 - **Nuevo**: launcher ELF mínimo versionado en el repo y compilado por
-  `install.sh` (ver R1 de `uso-sin-privilegios`); `CHANGELOG.md`.
+  `install.sh` (ver R1 de `uso-sin-privilegios`); `CHANGELOG.md`; workflow de CI
+  `.github/workflows/ci.yml` (jobs `tests` y `mutmut`, design D7).
 - **Config**: paths de estado de runtime (pidfile/log) con alternativa escrita
   por el usuario; nueva unit de usuario de systemd.
 - **Tests**: `tests/test_escama.py` — preflight, auto-install (bootstrap

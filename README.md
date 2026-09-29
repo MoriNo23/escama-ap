@@ -23,7 +23,7 @@ etc/systemd/system/escama-ap.service      # ExecStart=/opt/escama/escama.py star
 etc/systemd/system/escama-egress.service  # watcher VPN: escama.py watch 5
 etc/systemd/user/escama-ap.service        # autostart sin sudo (rootless) al iniciar sesión
 etc/systemd/user/escama-egress.service    # watcher VPN en modo rootless
-tests/test_escama.py        # 102 unit tests (mock de system calls, no toca el sistema)
+tests/test_escama.py        # 105 unit tests (mock de system calls, no toca el sistema)
 setup.cfg                   # config de mutmut (mutation testing)
 install.sh                  # ciclo de vida: install|uninstall|enable|disable|status|enable --user
 ```
@@ -182,12 +182,14 @@ y su motivo quedan en el log (`/var/log/escama-ap.log`).
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 102 tests (SIEMPRE el path explícito)
+python3 -m pytest tests/test_escama.py -q   # 105 tests (SIEMPRE el path explícito)
 ~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
 ```
 NO corras `python3 -m pytest` sin el path: `mutants/tests/` tiene el mismo
 basename y rompe la colección (pitfall documentado en AGENTS.md).
 Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.
+No es un dicho: un fixture `autouse` bloquea `subprocess` durante toda la suite,
+así que un test que se filtre falla con el comando que intentó ejecutar.
 
 ### Mutation testing (mutmut)
 
