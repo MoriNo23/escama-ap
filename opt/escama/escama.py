@@ -63,6 +63,10 @@ DEFAULTS = {
     "WAN_IFACE": "stonepi",
     "SSID": "escama",
     "CHANNEL": "6",
+    # auto : al start, elegir de {1,6,11} sin solape con el canal de la WAN
+    #        (solo lectura); WAN no legible -> CHANNEL de arriba.
+    # manual: CHANNEL tal cual (comportamiento clasico, sin deteccion).
+    "CHANNEL_MODE": "auto",
     "HW_MODE": "g",
     "AP_IP": "10.42.1.1",
     "AP_CIDR": "24",
@@ -279,6 +283,59 @@ def wan_has_internet(wan: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Seleccion de canal 2.4 GHz (evita el canal de la WAN, solo lectura)
+# ---------------------------------------------------------------------------
+
+# Canales mutuamente sin solape en 2.4 GHz con 20 MHz de ancho.
+CANALES_24G = (1, 6, 11)
+
+
+def detectar_canal_wan(wan: str) -> str:
+    """Canal 2.4 GHz donde opera la WAN asociada. SOLO LECTURA (regla de
+    oro): `iw dev <wan> link` y parseo de `freq: NNNN`. '' si la WAN no
+    aporta canal legible (ethernet, 5 GHz, sin asociacion, iw ausente)."""
+    if not wan or not iface_exists(wan):
+        return ""
+    p = run(["iw", "dev", wan, "link"], capture=True)
+    if not p or p.returncode != 0:
+        return ""
+    m = re.search(r"freq:?\s*(\d+)", p.stdout or "")
+    if not m:
+        return ""
+    freq = int(m.group(1))
+    if freq == 2484:
+        return "14"
+    canal = (freq - 2407) // 5
+    if 2412 <= freq <= 2472 and 1 <= canal <= 13:
+        return str(canal)
+    return ""
+
+
+def elegir_canal(cfg: dict) -> tuple:
+    """Canal del AP evitando el de la WAN. Devuelve (canal, motivo).
+
+    CHANNEL_MODE=manual -> CHANNEL del env tal cual (sin deteccion).
+    auto -> candidatos {1,6,11} a distancia >= 5 del canal de la WAN
+    (sin solape de 20 MHz); gana el mas lejano, empate -> menor canal.
+    Sin canal WAN legible -> CHANNEL del env (fallback seguro).
+    """
+    canal_env = (cfg.get("CHANNEL") or DEFAULTS["CHANNEL"]).strip()
+    modo = (cfg.get("CHANNEL_MODE") or "auto").strip().lower()
+    if modo == "manual":
+        return canal_env, f"manual: CHANNEL={canal_env} del env"
+    wan = (cfg.get("WAN_IFACE") or "").strip()
+    wan_ch = detectar_canal_wan(wan)
+    if not wan_ch:
+        return canal_env, f"fallback: WAN sin canal legible, uso CHANNEL={canal_env}"
+    wan_ch = int(wan_ch)
+    seguros = [c for c in CANALES_24G if abs(c - wan_ch) >= 5]
+    if not seguros:
+        return canal_env, f"fallback: sin candidato seguro vs WAN canal {wan_ch}"
+    elegido = max(seguros, key=lambda c: (abs(c - wan_ch), -c))
+    return str(elegido), f"auto: canal {elegido} (WAN en canal {wan_ch})"
+
+
+# ---------------------------------------------------------------------------
 # VPN / tunnel egress
 # ---------------------------------------------------------------------------
 
@@ -461,7 +518,7 @@ def clear_egress(cfg: dict, egress: str = "", kind: str = "") -> None:
     # policy routing
     for _ in range(3):
         # remove the AP-ingress rule (escama.py:537-538 uses `iif <ap>`);
-        # see DIAGNOSIS-FINAL.md §4.1 — previously `from <subnet>`, which also
+        # see docs/diagnostics/DIAGNOSIS-FINAL.md §4.1 — previously `from <subnet>`, which also
         # caught host-origin traffic from the AP IP and hijacked it into the
         # tunnel.
         r = run(["ip", "rule", "del", "iif", ap, "lookup", ESCAMA_TABLE],
@@ -541,7 +598,7 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
             # Match on the AP INGRESS interface, NOT the source subnet.
             # A `from <subnet>` selector also catches host-originated packets
             # from the AP IP (10.42.1.1), hijacking host->client scans into the
-            # tunnel (see DIAGNOSIS-FINAL.md §1 / §4.1). `iif <ap>` only matches
+            # tunnel (see docs/diagnostics/DIAGNOSIS-FINAL.md §1 / §4.1). `iif <ap>` only matches
             # forwarded client ingress, so host-origin traffic uses the main
             # table and reaches clients directly.
             run(["ip", "rule", "add", "iif", ap, "lookup", ESCAMA_TABLE,
@@ -605,9 +662,8 @@ def reload_module_if_needed(ap: str) -> None:
         time.sleep(2)
 
 
-def generate_configs(cfg: dict, kind: str = "") -> None:
-    """Single source of truth: env -> hostapd + dnsmasq confs."""
-    dns1, dns2 = effective_dns(cfg, kind)
+def generar_hostapd(cfg: dict) -> None:
+    """Genera hostapd-escama.conf desde el env (cfg['CHANNEL'] ya resuelto)."""
     hostapd = f"""interface={cfg['AP_IFACE']}
 driver=nl80211
 ssid={cfg['SSID']}
@@ -625,6 +681,14 @@ wpa_key_mgmt=WPA-PSK
 wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 """
+    os.makedirs(os.path.dirname(HOSTAPD_CONF), exist_ok=True)
+    with open(HOSTAPD_CONF, "w") as f:
+        f.write(hostapd)
+
+
+def generar_dnsmasq(cfg: dict, kind: str = "") -> None:
+    """Genera dnsmasq-escama.conf (DNS/MTU de clientes segun egress)."""
+    dns1, dns2 = effective_dns(cfg, kind)
     dnsmasq = f"""interface={cfg['AP_IFACE']}
 bind-interfaces
 dhcp-range={cfg['DHCP_START']},{cfg['DHCP_END']},255.255.255.0,{cfg['DHCP_LEASE']}
@@ -639,11 +703,19 @@ dhcp-leasefile={LEASE_FILE}
             if 0 < mtu < 1500:
                 # los clientes negocian MTU del tunnel -> nada de PMTU roto
                 dnsmasq += f"dhcp-option=option:mtu,{mtu}\n"
-    os.makedirs(os.path.dirname(HOSTAPD_CONF), exist_ok=True)
-    with open(HOSTAPD_CONF, "w") as f:
-        f.write(hostapd)
     with open(DNSMASQ_CONF, "w") as f:
         f.write(dnsmasq)
+
+
+def generate_configs(cfg: dict, kind: str = "") -> None:
+    """Single source of truth: env -> hostapd + dnsmasq confs (ambos).
+
+    Solo para `genconfig` y arranques: reescribe AMBOS confs. El watcher
+    de egress NO debe usar esto (regeneraria hostapd con canal obsoleto);
+    que use generar_dnsmasq() a solas.
+    """
+    generar_hostapd(cfg)
+    generar_dnsmasq(cfg, kind)
     log("Configs regenerated from escama.env")
 
 
@@ -712,7 +784,12 @@ def do_start() -> int:
 
     # decide egress BEFORE generating confs (DNS/MTU dependen del tunnel)
     egress, kind = resolve_egress(cfg)
-    generate_configs(cfg, kind)
+    # canal: evitar el de la WAN (CHANNEL_MODE=auto) o CHANNEL del env (manual)
+    canal, motivo = elegir_canal(cfg)
+    cfg["CHANNEL"] = canal
+    log(f"Canal AP: {canal} ({motivo})")
+    generar_hostapd(cfg)
+    generar_dnsmasq(cfg, kind)
     _kill_procs()
 
     # assign AP IP
@@ -825,8 +902,9 @@ def do_egress(args: list = None) -> int:
         cfg["WAN_IFACE"] = detect_wan_iface(cfg)
     egress, kind = resolve_egress(cfg)
     apply_egress(cfg, egress, kind)
-    # DNS/MTU de los clientes cambian con el tunnel -> regenerar y recargar
-    generate_configs(cfg, kind)
+    # DNS/MTU de los clientes cambian con el tunnel -> regenerar SOLO dnsmasq.
+    # hostapd no se toca: el canal del AP debe quedar estable en vivo.
+    generar_dnsmasq(cfg, kind)
     run(["pkill", "-HUP", "-x", "dnsmasq"], check=False)
     return 0 if egress else 1
 
@@ -845,7 +923,8 @@ def do_watch(interval: int = 5) -> int:
         if (egress, kind) != last:
             log(f"watch: cambio de salida -> {egress or '(ninguna)'} ({kind})")
             apply_egress(cfg, egress, kind)
-            generate_configs(cfg, kind)
+            # solo dnsmasq: NUNCA regenerar hostapd aqui (canal estable)
+            generar_dnsmasq(cfg, kind)
             run(["pkill", "-HUP", "-x", "dnsmasq"], check=False)
             last = (egress, kind)
         time.sleep(interval)

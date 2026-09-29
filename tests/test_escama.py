@@ -189,7 +189,8 @@ def test_do_start_validates_real_ap_mode(monkeypatch):
         "CHANNEL": "6", "HW_MODE": "g", "AP_IP": "10.42.1.1", "AP_CIDR": "24",
         "AP_SUBNET": "10.42.1.0/24", "DHCP_START": "10.42.1.10", "DHCP_END": "10.42.1.254",
         "DHCP_LEASE": "12h", "WPA_PASSPHRASE": "x", "DNS1": "8.8.8.8", "DNS2": "8.8.4.4"})
-    monkeypatch.setattr(escama, "generate_configs", lambda c, kind="": None)
+    monkeypatch.setattr(escama, "generar_hostapd", lambda c: None)
+    monkeypatch.setattr(escama, "generar_dnsmasq", lambda c, kind="": None)
     monkeypatch.setattr(escama, "_kill_procs", lambda: None)
     monkeypatch.setattr(escama, "_ensure_ip", lambda *a: None)
     rc = escama.do_start()
@@ -216,7 +217,8 @@ def test_do_start_fails_when_ap_mode_not_reached(monkeypatch):
         "CHANNEL": "6", "HW_MODE": "g", "AP_IP": "10.42.1.1", "AP_CIDR": "24",
         "AP_SUBNET": "10.42.1.0/24", "DHCP_START": "10.42.1.10", "DHCP_END": "10.42.1.254",
         "DHCP_LEASE": "12h", "WPA_PASSPHRASE": "x", "DNS1": "8.8.8.8", "DNS2": "8.8.4.4"})
-    monkeypatch.setattr(escama, "generate_configs", lambda c, kind="": None)
+    monkeypatch.setattr(escama, "generar_hostapd", lambda c: None)
+    monkeypatch.setattr(escama, "generar_dnsmasq", lambda c, kind="": None)
     monkeypatch.setattr(escama, "_kill_procs", lambda: None)
     monkeypatch.setattr(escama, "_ensure_ip", lambda *a: None)
     rc = escama.do_start()
@@ -611,3 +613,189 @@ def test_generate_configs_wan_has_no_mtu_option(tmp_path, monkeypatch):
     escama.generate_configs(dict(escama.DEFAULTS), "wan")
     dq = (tmp_path / "dnsmasq.conf").read_text()
     assert "option:mtu" not in dq
+
+
+# ---------------------------------------------------------------------------
+# Selección de canal (CHANNEL_MODE auto/manual, evita el canal de la WAN)
+# ---------------------------------------------------------------------------
+
+def _cfg_canal(**over):
+    return dict(escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi", **over)
+
+
+def _fake_iw_link(stdout_iw):
+    """fake_run que responde los `iw dev <wan> link` con la salida dada."""
+    def fake_run(cmd, check=True, capture=True):
+        class R:
+            returncode = 0
+            stdout = stdout_iw if cmd[:2] == ["iw", "dev"] else ""
+            stderr = ""
+        return R()
+    return fake_run
+
+
+def test_detectar_canal_wan_parsea_freq(monkeypatch):
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    casos = {"2412": "1", "2422": "3", "2437": "6", "2462": "11",
+             "2472": "13", "2484": "14"}
+    for freq, canal in casos.items():
+        monkeypatch.setattr(escama, "run", _fake_iw_link(f"freq: {freq} MHz"))
+        assert escama.detectar_canal_wan("stonepi") == canal, freq
+
+
+def test_detectar_canal_wan_no_legible(monkeypatch):
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    # sin asociacion / 5 GHz / fuera de rango / rc != 0 / WAN ausente
+    monkeypatch.setattr(escama, "run", _fake_iw_link("Not connected."))
+    assert escama.detectar_canal_wan("stonepi") == ""
+    monkeypatch.setattr(escama, "run", _fake_iw_link("freq: 5180 MHz"))
+    assert escama.detectar_canal_wan("stonepi") == ""
+    monkeypatch.setattr(escama, "run", _fake_iw_link("freq: 2400 MHz"))
+    assert escama.detectar_canal_wan("stonepi") == ""
+
+    def rc_fail(cmd, check=True, capture=True):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", rc_fail)
+    assert escama.detectar_canal_wan("stonepi") == ""
+    monkeypatch.setattr(escama, "iface_exists", lambda x: False)
+    assert escama.detectar_canal_wan("") == ""
+    assert escama.detectar_canal_wan("noexiste") == ""
+
+
+def test_elegir_canal_tabla_determinista(monkeypatch):
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    # WAN 6 -> empate 1/11 a distancia 5 -> gana el menor (canal 1)
+    monkeypatch.setattr(escama, "run", _fake_iw_link("freq: 2437 MHz"))
+    canal, motivo = escama.elegir_canal(_cfg_canal(CHANNEL="6"))
+    assert canal == "1" and "WAN en canal 6" in motivo
+    # WAN 1 -> canal 11 (distancia 10)
+    monkeypatch.setattr(escama, "run", _fake_iw_link("freq: 2412 MHz"))
+    assert escama.elegir_canal(_cfg_canal(CHANNEL="6"))[0] == "11"
+    # WAN 4 (solapa con 1 y 6) -> 11 unico seguro
+    monkeypatch.setattr(escama, "run", _fake_iw_link("freq: 2422 MHz"))
+    assert escama.elegir_canal(_cfg_canal(CHANNEL="6"))[0] == "11"
+    # WAN 11 -> canal 1
+    monkeypatch.setattr(escama, "run", _fake_iw_link("freq: 2462 MHz"))
+    assert escama.elegir_canal(_cfg_canal(CHANNEL="6"))[0] == "1"
+
+
+def test_elegir_canal_fallback_sin_wan_legible(monkeypatch):
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    monkeypatch.setattr(escama, "run", _fake_iw_link("Not connected."))
+    canal, motivo = escama.elegir_canal(_cfg_canal(CHANNEL="6"))
+    assert canal == "6" and "fallback" in motivo
+
+
+def test_elegir_canal_default_es_auto():
+    assert escama.DEFAULTS["CHANNEL_MODE"] == "auto"
+
+
+def test_elegir_canal_manual_no_consulta_la_wan(monkeypatch):
+    """CHANNEL_MODE=manual: usa CHANNEL del env y NUNCA consulta la WAN."""
+    def fake_run(cmd, check=True, capture=True):
+        if cmd[:3] == ["iw", "dev", "stonepi"] and "link" in cmd:
+            raise AssertionError("manual no debe consultar el canal de la WAN")
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    canal, motivo = escama.elegir_canal(_cfg_canal(CHANNEL_MODE="manual",
+                                                  CHANNEL="6"))
+    assert canal == "6" and "manual" in motivo
+
+
+def test_do_start_resuelve_canal_y_logea(monkeypatch, capsys):
+    """do_start elige el canal ANTES de generar confs y lo loguea."""
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            if cmd[:3] == ["iw", "dev", "stonepi"] and "link" in cmd:
+                stdout = "freq: 2437 MHz\n"  # WAN en canal 6
+            elif cmd[:2] == ["iw", "dev"]:
+                stdout = "type AP\nssid escama\n"
+            else:
+                stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    monkeypatch.setattr(escama, "_ap_phy", lambda: "phy2")
+    monkeypatch.setattr(escama, "load_env", lambda: {
+        "AP_IFACE": "wn8200nd", "WAN_IFACE": "stonepi", "SSID": "escama",
+        "CHANNEL": "6", "CHANNEL_MODE": "auto", "HW_MODE": "g",
+        "AP_IP": "10.42.1.1", "AP_CIDR": "24", "AP_SUBNET": "10.42.1.0/24",
+        "DHCP_START": "10.42.1.10", "DHCP_END": "10.42.1.254",
+        "DHCP_LEASE": "12h", "WPA_PASSPHRASE": "x", "DNS1": "8.8.8.8",
+        "DNS2": "8.8.4.4"})
+    generados = {}
+    monkeypatch.setattr(escama, "generar_hostapd",
+                        lambda c: generados.update(canal=c["CHANNEL"]))
+    monkeypatch.setattr(escama, "generar_dnsmasq", lambda c, kind="": None)
+    monkeypatch.setattr(escama, "_kill_procs", lambda: None)
+    monkeypatch.setattr(escama, "_ensure_ip", lambda *a: None)
+    rc = escama.do_start()
+    assert rc == 0
+    # WAN en canal 6 -> el AP arranca en el 1 y el log dice por que
+    assert generados["canal"] == "1"
+    out = capsys.readouterr().out
+    assert "Canal AP: 1" in out and "WAN en canal 6" in out
+
+
+def test_do_watch_no_reescribe_hostapd(monkeypatch, tmp_path):
+    """watch solo regenera dnsmasq; hostapd.conf (canal) queda intacto."""
+    ha = tmp_path / "hostapd.conf"
+    ha.write_text("channel=1\n")
+    monkeypatch.setattr(escama, "HOSTAPD_CONF", str(ha))
+    monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    monkeypatch.setattr(escama, "load_env", lambda: dict(
+        escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
+        CHANNEL="1"))
+    monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "proton0")
+    monkeypatch.setattr(escama, "apply_egress", lambda c, e, k: None)
+
+    def fake_run(cmd, check=True, capture=True):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+
+    def boom(interval):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(escama.time, "sleep", boom)
+    with pytest.raises(KeyboardInterrupt):
+        escama.do_watch(5)
+    assert ha.read_text() == "channel=1\n"
+    assert (tmp_path / "dnsmasq.conf").exists()
+
+
+def test_do_egress_no_reescribe_hostapd(monkeypatch, tmp_path):
+    """egress solo regenera dnsmasq; hostapd.conf (canal) queda intacto."""
+    ha = tmp_path / "hostapd.conf"
+    ha.write_text("channel=1\n")
+    monkeypatch.setattr(escama, "HOSTAPD_CONF", str(ha))
+    monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    monkeypatch.setattr(escama, "load_env", lambda: dict(
+        escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
+        CHANNEL="1"))
+    monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "proton0")
+    monkeypatch.setattr(escama, "apply_egress", lambda c, e, k: None)
+    monkeypatch.setattr(escama, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    rc = escama.do_egress([])
+    assert rc == 0
+    assert ha.read_text() == "channel=1\n"
+    assert (tmp_path / "dnsmasq.conf").exists()
