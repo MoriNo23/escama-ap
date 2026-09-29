@@ -13,18 +13,22 @@ Consolidado de 6 scripts bash sueltos → **1 librería Python + 1 TUI**. Menos 
 única fuente de verdad.
 
 ```
-opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig
+opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig|egress|watch
 opt/escama/escama-tui.py    # TUI (whiptail): edita escama.env y regenera confs
 etc/escama/escama.env       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID, etc.)
 etc/hostapd/hostapd-escama.conf    # generado desde escama.env (no editar a mano)
 etc/dnsmasq-escama.conf           # generado desde escama.env (no editar a mano)
 etc/systemd/system/escama-ap.service      # ExecStart=/opt/escama/escama.py start
 etc/systemd/system/escama-egress.service  # watcher VPN: escama.py watch 5
-tests/test_escama.py        # 35 unit tests (mock de system calls, no toca el sistema)
+tests/test_escama.py        # 45 unit tests (mock de system calls, no toca el sistema)
 setup.cfg                   # config de mutmut (mutation testing)
+install.sh                  # ciclo de vida: install|uninstall|enable|disable|status
 ```
 
-Binarios: `escama` y `escama-tui` → symlinks en `/usr/local/bin/` y `~/.local/bin/`.
+Instalación y autostart: `sudo ./install.sh install|enable|disable|uninstall` y
+`./install.sh status` — crea los symlinks de `escama`/`escama-tui` en
+`/usr/local/bin/`, instala los units y **nunca pisa tu `escama.env`** (las
+novedades quedan al lado, en `escama.env.new`).
 
 ## Diseño anti-errores (por qué no se rompe solo)
 
@@ -47,6 +51,11 @@ Binarios: `escama` y `escama-tui` → symlinks en `/usr/local/bin/` y `~/.local/
 7. **Bug de IP duplicada mitigado**: `do_stop()` y `_ensure_ip()` hacen `ip addr flush`
    sobre la AP iface, evitando que quede `10.42.1.1/24` pegado en la WAN (que dropeaba
    las respuestas DNS de los clientes con `ICMP unreachable`).
+8. **Canal sin choque con la WAN**: al `start`, `CHANNEL_MODE=auto` lee el canal de la
+   WAN (solo lectura, `iw dev <wan> link`), elige de `{1, 6, 11}` el canal sin solape
+   (gana el más lejano; empate → menor) y lo loguea. WAN no WiFi legible (ethernet,
+   5 GHz, desconectada) → `CHANNEL` del env. El watcher de VPN solo regenera dnsmasq:
+   **el canal nunca cambia con el AP activo**.
 
 ## Uso
 
@@ -67,13 +76,12 @@ sudo escama-tui              # menú interactivo (whiptail) para editar escama.e
 ## systemd
 
 ```bash
-sudo systemctl enable escama-ap.service   # arranca en boot
-sudo systemctl start  escama-ap.service   # levanta ahora
-sudo systemctl status escama-ap.service
+sudo ./install.sh enable      # arranca al boot + ahora (escama-ap + escama-egress)
+sudo ./install.sh disable      # NO arranca al boot + detiene ahora
+sudo ./install.sh status      # estado por componente (units, symlinks, env)
 ```
-```bash
-sudo systemctl enable --now escama-egress.service   # sigue la VPN automaticamente
-```
+Equivale a `systemctl enable/disable --now` sobre los units instalados, con
+tolerancia a los que falten en esa máquina.
 
 `Restart=on-failure` reinicia el service si el proceso muere (no por fallo de hardware:
 si el adaptador se desenchufa, hay que correr `sudo escama.py reconnect` a mano).
@@ -92,24 +100,48 @@ El masquerade y las validaciones usan estos valores; no hay hardcodeos que rompa
 (NOTA: hoy stonepi da internet al equipo y al TV vía NAT; invertirlo requiere que
 wn8200nd sea cliente con internet.)
 
+## Canal del AP (no chocar con la WAN)
+
+```ini
+# /etc/escama/escama.env
+CHANNEL_MODE="auto"    # auto = al start elige de {1,6,11} sin solape con la WAN
+                       # manual = usa CHANNEL tal cual (comportamiento clásico)
+CHANNEL="6"            # fallback si la WAN no es WiFi legible (o en modo manual)
+```
+
+La detección lee la WAN sin modificarla (`iw dev <wan> link`); el canal elegido
+y su motivo quedan en el log (`/var/log/escama-ap.log`).
+
 ## Testing
 
 ```bash
-cd escama-ap
-PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 15 tests
-python3 -m mutmut run                                         # mutation testing
+python3 -m pytest tests/test_escama.py -q   # 45 tests (SIEMPRE el path explícito)
+python3 -m mutmut run                        # mutation testing (lee setup.cfg)
 ```
+NO corras `python3 -m pytest` sin el path: `mutants/tests/` tiene el mismo
+basename y rompe la colección (pitfall documentado en AGENTS.md).
 Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.
 
 ### Mutation testing (mutmut)
-- 1ª suite (9 tests): 772 mutantes, ~19% killed → reveló funciones sin cubrir
-  (`do_stop`, `do_status`, `wan_has_internet`, `main`).
-- 2ª suite (15 tests): 775 mutantes, 264 killed / 158 survived ≈ 62.6%.
-- 3ª suite (19 tests, tras agregar log()/load_env() + fix dir-creacion): 783 mutantes,
-  **279 killed / 158 survived ≈ 63.8%**.
+
+| Suite (evolución) | Tests | Mutantes | Killed / survived |
+|---|---|---|---|
+| 1ª — inicial (reveló `do_stop`, `do_status`, `wan_has_internet`, `main` sin cubrir) | 9 | 772 | ~19% killed |
+| 2ª | 15 | 775 | 264 / 158 ≈ 62.6% |
+| 3ª — `log()`/`load_env()` + fix de dir-creación | 19 | 783 | 279 / 158 ≈ 63.8% |
+| 4ª — selección de canal + split de generación de confs | 45 | 2170 | 676 / 1136 ≈ 37.3% de los testeados |
+
+- La 4ª corrida usa la base de conteo actual de mutmut 3.7 (2170 mutantes vs 783 de
+  la 3ª): no comparable en valor absoluto con las filas anteriores.
+- Survived del feature nuevo (selección de canal): **equivalentes** — guardas
+  redundantes re-rankeadas por `max()`, defaults que `load_env()` siempre mergea, y
+  boundary `run()` (mockeado por diseño). Los mutantes significativos (umbral de
+  distancia, desempate, parseo de freq, fallback, modo manual) mueren con la tabla
+  de tests.
+- ~357 untested: mutantes en funciones sin tests mapeados (`main`, `_prompt_iface`,
+  caminos de `do_watch`) — condición preexistente.
 - Supervivientes restantes: en `load_env()` (parsing de .env, ramas no ejercitadas por
   los inputs de test) y `log()` (formato de string). `run()` es el boundary mockeado.
-  Los ~346 🙁 son timeouts por `sleep` en start/stop (ruido de la técnica).
 - Conclusión: TODA la lógica anti-errores crítica está cubierta. No se persiguió 80%
   por diminishing returns (tests quirúrgicos por cada rama de parsing de un .env trivial).
 
