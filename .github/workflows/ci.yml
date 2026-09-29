@@ -28,8 +28,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           # la version del repo (setup.cfg: python_version = 3.13)
           python-version: '3.13'
@@ -48,8 +48,8 @@ jobs:
     # local tarda 30+ min; el corte evita quemar minutos si algo cuelga
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - name: Instalar mutmut
