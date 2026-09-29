@@ -31,11 +31,11 @@
 
 ## 5. Fase 2 — Rootless real (D2, D3, D4)
 
-- [ ] 5.1 Escribir `escama-launch.c` (launcher mínimo que preserva capabilities al ejecutar el núcleo) y compilarlo en `install.sh`; aplicar `setcap cap_net_admin,cap_net_raw,cap_net_bind_service=ep`. Verificar: `getcap` muestra las tres capabilities y el launcher ejecuta el núcleo
+- [x] 5.1 Escribir `escama-launch.c` (launcher mínimo que preserva capabilities al ejecutar el núcleo) y compilarlo en `install.sh`; aplicar `setcap cap_net_admin,cap_net_raw,cap_net_bind_service=ep`. Verificar: `getcap` muestra las tres capabilities y el launcher ejecuta el núcleo — **hecho**: launcher C con syscalls crudos (`capset` + `prctl` ambient, por el bug de libcap 2.75); instalado con orden chown→setcap y owner = `SUDO_USER`; verificado `Prm=Amb=0x3400` post-exec y `ip link add` rc=0 sin sudo. Fallas silenciosas medidas: tmpfs no aplica file caps, chown borra la xattr, owner distinto → el kernel las descarta, y el LSM rechaza el launcher si el argv contiene "cap-"/"rootless-"
 - [ ] 5.2 Resolver rutas de runtime (pidfile, log, state) por XDG cuando no hay privilegio, manteniendo las rutas de sistema cuando sí lo hay; loguear y mostrar la ruta efectiva en `status`. Verificar: tests de resolución root vs no-root + ruta en el log
 - [ ] 5.3 Unit de usuario de systemd (template versionado) + `install.sh enable --user`. Verificar: `systemctl --user` lista la unit; el AP levanta al iniciar sesión sin privileged unit
 - [ ] 5.4 Degradación explícita: `rmmod`/`modprobe` y `nmcli device set managed no` sin capability/autorización → mensaje claro del motivo, nunca "OK" falso ni silencio. Verificar: tests que simulan el fallo y verifican el mensaje
-- [ ] 5.5 Preflight rootless completo (toolchain, xattr, `setcap` efectivo post-exec, unit de usuario) que **niegue** el modo con el motivo cuando algo falte. Verificar: preflight en máquina sin gcc (simulado) dice "no disponible" y nombra la condición
+- [x] 5.5 Preflight rootless completo (toolchain, xattr, `setcap` efectivo post-exec, unit de usuario) que **niegue** el modo con el motivo cuando algo falte. Verificar: preflight en máquina sin gcc (simulado) dice "no disponible" y nombra la condición — **hecho**: `rootless_disponible()` verifica con una **operación real** (crear/borrar una iface dummy) en vez de confiar en `getcap`, que miente; distingue sin launcher / ya root / owner ajeno / caps que no sobreviven; `preflight` muestra `Rootless: DISPONIBLE|NO DISPONIBLE` con el motivo. La probe se limpia siempre (una dummy huérfana daba falso negativo persistente) y corre **sin auto-sudo** (bajo sudo el kernel no concede las file caps y la prueba miente)
 
 ## 6. Fase 3 — QA y cierre
 

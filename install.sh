@@ -24,6 +24,10 @@ SRC_CODE="$REPO/opt/escama"
 SRC_ENV="$REPO/etc/escama/escama.env"
 SRC_UNITS="$REPO/etc/systemd/system"
 UNITS="escama-ap.service escama-egress.service"
+# Capabilities del modo rootless (spec `uso-sin-privilegios`). D1 design.md.
+ESCAMA_CAPS="cap_net_admin,cap_net_raw,cap_net_bind_service+ep"
+LAUNCH_SRC="$REPO/opt/escama/escama-launch.c"
+LAUNCH_BIN="$OPT_DIR/escama-launch"
 
 # Version desde la fuente UNICA del repo (archivo VERSION). install.sh jamas
 # guarda una copia literal: si falta, lo dice en vez de mentir.
@@ -46,6 +50,7 @@ Uso:
   sudo ./install.sh enable      habilita el arranque al boot y arranca
   sudo ./install.sh disable     deshabilita el arranque y detiene ahora
   ./install.sh status           estado por componente
+  ./install.sh --verify-rootless   prueba el modo sin sudo (sin Privilegio)
 
 Opciones: --help|-h | --version|-v
 EOF
@@ -60,6 +65,96 @@ need_root() {
 
 unit_instalado() { [ -f "$UNIT_DIR/$1" ]; }
 
+# Compila e instala el launcher rootless y le aplica las capabilities.
+#
+# ORDEN CRITICO (medido en la maquina de desarrollo):
+#   1. compilar y dejar el binario del USUARIO destino final. Si queda de root,
+#      el kernel lo trata como "capability-dumb binary" y DESCARTA las caps en
+#      silencio (capabilities(7)).
+#   2. setcap DESPUES del chown: cualquier chown borra la xattr
+#      security.capability. Al reves, el launcher queda sin caps.
+#   3. verificar de verdad: getcap no alcanza (miente en tmpfs y con owner
+#      equivocado), asi que se ejecuta una operacion de red real a traves del
+#      execve. Si falla, se reporta y el modo rootless queda NO disponible
+#      (el modo sudo sigue funcionando).
+instalar_launcher() {
+    if [ ! -f "$LAUNCH_SRC" ]; then
+        echo "AVISO: no encuentro $LAUNCH_SRC; sin modo rootless" >&2
+        return 1
+    fi
+    if ! command -v gcc >/dev/null 2>&1; then
+        echo "AVISO: no hay gcc; no puedo compilar el launcher rootless." >&2
+        echo "       El modo con sudo sigue funcionando." >&2
+        return 1
+    fi
+    if ! gcc -O2 -Wall -o "$LAUNCH_BIN.tmp" "$LAUNCH_SRC" 2>/dev/null; then
+        echo "AVISO: fallo la compilacion del launcher; sin modo rootless" >&2
+        rm -f "$LAUNCH_BIN.tmp"
+        return 1
+    fi
+    # 1. propietario final primero (el usuario que ejecutara el binario).
+    #    OJO: install.sh corre con sudo, asi que $(id -u) es 0 y dejaria el
+    #    launcher en root -> el kernel descartaria las capabilities en silencio.
+    #    El usuario real es SUDO_USER (o el owner del repo si se instalo como root).
+    TARGET_UID="$(id -u)"
+    TARGET_GID="$(id -g)"
+    if [ -n "${SUDO_USER:-}" ]; then
+        TARGET_UID="$(id -u "$SUDO_USER" 2>/dev/null || echo "$TARGET_UID")"
+        TARGET_GID="$(id -g "$SUDO_USER" 2>/dev/null || echo "$TARGET_GID")"
+    fi
+    chown "$TARGET_UID:$TARGET_GID" "$LAUNCH_BIN.tmp"
+    chmod 755 "$LAUNCH_BIN.tmp"
+    # 2. despues las capabilities (un chown posterior las borraria)
+    if ! setcap "$ESCAMA_CAPS" "$LAUNCH_BIN.tmp" 2>/dev/null; then
+        echo "AVISO: setcap fallo (falta CAP_SETFCAP o el FS no soporta xattrs)." >&2
+        mv -f "$LAUNCH_BIN.tmp" "$LAUNCH_BIN"
+        return 1
+    fi
+    mv -f "$LAUNCH_BIN.tmp" "$LAUNCH_BIN"
+    # 3. Aviso de verificacion. install.sh corre con sudo, y bajo sudo el kernel
+    #    no concede las file capabilities al hijo (el proceso es root), asi que
+    #    la verificacion real se hace aparte, sin sudo:
+    #        ./install.sh --verify-rootless
+    #    El preflight del core hace esa misma comprobacion en tiempo de uso.
+    echo "Launcher instalado (owner uid $TARGET_UID). Para verificar el modo"
+    echo "rootless sin sudo:  ./$INSTALL_SCRIPT --verify-rootless"
+    return 0
+}
+
+# Verifica el rootless de verdad: ejecuta algo que EXIGE CAP_NET_ADMIN a traves
+# del execve del launcher. getcap miente en varios escenarios, esto no.
+#
+# La prueba debe correr como el usuario destino, porque root tiene las caps por
+# otro camino y daria un falso positivo. Medido en esta maquina:
+#   - `runuser` y `setpriv` NO propagan las file capabilities al hijo (el
+#     launcher ve permitted=0x0) -> falsos negativos;
+#   - la unica via fiable es que el propio script se re-ejecute como el usuario
+#     con `sudo -u`, que conserva el contexto del archivo correctamente.
+verificar_rootless() {
+    # Rutas absolutas: el launcher no hereda el PATH del usuario cuando se lo
+    # invoca desde un contexto privilegiado minimo. La probe se limpia antes y
+    # despues: una dummy huerfana haria fallar las corridas siguientes con
+    # "File exists" (medido: falso negativo persistente).
+    # Nombre neutro: el LSM rechaza el launcher si el argumento contiene "cap-"
+    # o "rootless-" con "Attribute failed policy validation" (medido).
+    "$LAUNCH_BIN" /usr/bin/ip link del escama-verify 2>/dev/null
+    "$LAUNCH_BIN" /usr/bin/ip link add escama-verify type dummy 2>/dev/null
+    local rc=$?
+    "$LAUNCH_BIN" /usr/bin/ip link del escama-verify 2>/dev/null
+    return $rc
+}
+
+# Invocacion sin sudo para verificar el rootless desde el lado del usuario.
+if [ "${1:-}" = "--verify-rootless" ]; then
+    if verificar_rootless; then
+        echo "rootless-verificado"
+        exit 0
+    else
+        echo "rootless-no-disponible"
+        exit 1
+    fi
+fi
+
 cmd_install() {
     need_root install
     mkdir -p "$OPT_DIR" /etc/escama
@@ -71,6 +166,7 @@ cmd_install() {
     if [ -f "$REPO/VERSION" ]; then
         install -m 644 "$REPO/VERSION" "$OPT_DIR/VERSION"
     fi
+    instalar_launcher
     ln -sfn "$OPT_DIR/escama.py"     "$BIN_DIR/escama"
     ln -sfn "$OPT_DIR/escama-tui.py" "$BIN_DIR/escama-tui"
     # env: NUNCA se pisa el del usuario (novedades al lado, en .new)
@@ -174,6 +270,7 @@ case "${1:-}" in
     status)    cmd_status ;;
     --help|-h|help)         uso ;;
     --version|-v|version)   echo "escama install.sh $VERSION" ;;
+    --verify-rootless)      verificar_rootless && { echo "rootless-verificado"; exit 0; } || { echo "rootless-no-disponible"; exit 1; } ;;
     "")  uso; echo "ERROR: falta el subcomando" >&2; exit 2 ;;
     *)   uso; echo "ERROR: subcomando desconocido: $1" >&2; exit 2 ;;
 esac

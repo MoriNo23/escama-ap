@@ -297,21 +297,33 @@ def test_do_status_runs(monkeypatch, capsys):
 
 
 def test_main_dispatch(monkeypatch, capsys):
-    """main() must route args to correct action and require root."""
-    # non-root -> exit 1
+    """main() rutea cada arg a su accion; solo-lectura no pide root."""
+    # El preflight/bootstrap no debe tocar el sistema real en tests.
+    monkeypatch.setattr(escama, "preflight", lambda: {
+        "estado": "completa", "componentes": {}, "faltan": [],
+        "version_repo": "1", "version_instalada": "1"})
+    monkeypatch.setattr(escama, "rootless_disponible",
+                        lambda: (False, "sin launcher en el test"))
+    # Sin args, la accion por defecto es `status`, que es de solo lectura:
+    # corre sin root (antes rebotaba pidiendo sudo).
     monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
-    assert escama.main() == 1
-    # status as root (default action via empty args)
-    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
     monkeypatch.setattr(escama, "do_status", lambda: 0)
-    assert escama.main([]) == 0  # default action = status
+    assert escama.main([]) == 0
+    # Con root, el resto de las acciones despachan normal.
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    assert escama.main([]) == 0
     monkeypatch.setattr(escama, "do_stop", lambda: 0)
     assert escama.main(["stop"]) == 0
     monkeypatch.setattr(escama, "do_start", lambda: 0)
     assert escama.main(["start"]) == 0
+    monkeypatch.setattr(escama, "do_preflight", lambda: 0)
+    assert escama.main(["preflight"]) == 0
 
 
 def test_main_unknown(monkeypatch, capsys):
+    monkeypatch.setattr(escama, "preflight", lambda: {
+        "estado": "completa", "componentes": {}, "faltan": [],
+        "version_repo": "1", "version_instalada": "1"})
     monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
     assert escama.main(["bogus"]) == 2
 
@@ -806,6 +818,9 @@ def test_do_egress_no_reescribe_hostapd(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 RAIZ_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# euid real capturado antes de cualquier monkeypatch de os.geteuid:
+# patchearlo con un lambda que lo vuelve a leer causa recursion.
+_EUID = os.geteuid()
 
 
 def test_escama_lee_la_version_del_archivo_unico():
@@ -874,6 +889,9 @@ def test_acciones_de_solo_lectura_no_piden_privilegio():
 
 def test_main_solo_lectura_corren_sin_root(monkeypatch, capsys):
     """status/--help/--version NO deben rebotar por falta de root."""
+    monkeypatch.setattr(escama, "preflight", lambda: {
+        "estado": "completa", "componentes": {}, "faltan": [],
+        "version_repo": "1", "version_instalada": "1"})
     monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(escama, "do_status", lambda: 0)
     assert escama.main(["status"]) == 0
@@ -883,14 +901,19 @@ def test_main_solo_lectura_corren_sin_root(monkeypatch, capsys):
 
 
 def test_main_mutante_exige_privilegio_con_mensaje(monkeypatch, capsys):
+    monkeypatch.setattr(escama, "preflight", lambda: {
+        "estado": "completa", "componentes": {}, "faltan": [],
+        "version_repo": "1", "version_instalada": "1"})
     monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(escama, "rootless_disponible",
+                        lambda: (False, "sin launcher en el test"))
     called = []
     monkeypatch.setattr(escama, "do_start", lambda: called.append(1) or 0)
     rc = escama.main(["start"])
     assert rc == 1, "una accion mutante sin privilegio debe fallar"
     assert not called, "no debe ejecutar la accion sin privilegio"
     err = capsys.readouterr().err
-    assert "sudo" in err and "rootless" in err
+    assert "sudo" in err and "Motivo" in err
 
 
 # ---------------------------------------------------------------------------
@@ -1069,3 +1092,136 @@ def test_main_mutante_bootstrap_fallido_aborta(monkeypatch):
     monkeypatch.setattr(escama, "do_start", lambda: called.append(1) or 0)
     assert escama.main(["start"]) == 1
     assert not called, "no debe ejecutar la accion si el bootstrap falla"
+
+
+# ---------------------------------------------------------------------------
+# Rootless (spec `uso-sin-privilegios`): launcher, probe y degradacion
+# ---------------------------------------------------------------------------
+
+def test_rootless_no_disponible_sin_launcher(tmp_path, monkeypatch):
+    monkeypatch.setattr(escama, "LAUNCHER", str(tmp_path / "no-existe"))
+    ok, motivo = escama.rootless_disponible()
+    assert ok is False
+    assert "no esta instalado" in motivo
+
+
+def test_rootless_no_disponible_si_es_root(tmp_path, monkeypatch):
+    """Con root el rootless no aplica: no es un motivo de negation real."""
+    p = tmp_path / "escama-launch"
+    p.write_text("x")
+    monkeypatch.setattr(escama, "LAUNCHER", str(p))
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    ok, motivo = escama.rootless_disponible()
+    assert ok is False and "root" in motivo
+
+
+def test_rootless_no_disponible_con_owner_ajeno(tmp_path, monkeypatch):
+    """El kernel descarta las caps si el launcher no es del usuario (falla
+    en silencio): el preflight MUST detectarlo por owner."""
+    p = tmp_path / "escama-launch"
+    p.write_text("x")
+    os.chmod(p, 0o755)
+    monkeypatch.setattr(escama, "LAUNCHER", str(p))
+    monkeypatch.setattr(escama.os, "geteuid", lambda: _EUID)
+    st = os.stat(p)
+    real_stat = os.stat
+    # simular owner distinto sin tocar el archivo real
+    real = os.stat(p)
+    class FakeStat:
+        st_uid = 12345
+        st_mode = real.st_mode
+        st_size = real.st_size
+        st_mtime = real.st_mtime
+    monkeypatch.setattr(escama.os, "stat", lambda _p, **kw: FakeStat())
+    ok, motivo = escama.rootless_disponible()
+    assert ok is False
+    assert "uid 12345" in motivo and "silencio" in motivo
+    monkeypatch.setattr(escama.os, "stat", real_stat)
+
+
+def test_rootless_verifica_con_operacion_real(tmp_path, monkeypatch):
+    """La verificacion NO se fia de getcap: ejecuta una operacion real."""
+    p = tmp_path / "escama-launch"
+    p.write_text("x")
+    os.chmod(p, 0o755)
+    monkeypatch.setattr(escama, "LAUNCHER", str(p))
+    monkeypatch.setattr(escama.os, "geteuid", lambda: _EUID)
+    llamadas = []
+
+    def fake_run_sin_sudo(cmd):
+        llamadas.append(cmd)
+        return 0
+    monkeypatch.setattr(escama, "_run_sin_sudo", fake_run_sin_sudo)
+    ok, motivo = escama.rootless_disponible()
+    assert ok is True
+    # debe limpiar antes, crear (la prueba) y borrar despues
+    ops = [" ".join(c) for c in llamadas]
+    assert any("link del" in o and escama.PROBE_IFACE in o for o in ops), ops
+    assert any("link add" in o and "dummy" in o for o in ops), ops
+    assert ops[-1].count("link del") >= 1, "la probe debe limpiar al final"
+
+
+def test_rootless_falla_si_la_operacion_no_pasa(tmp_path, monkeypatch):
+    p = tmp_path / "escama-launch"
+    p.write_text("x")
+    os.chmod(p, 0o755)
+    monkeypatch.setattr(escama, "LAUNCHER", str(p))
+    monkeypatch.setattr(escama.os, "geteuid", lambda: _EUID)
+    monkeypatch.setattr(escama, "_run_sin_sudo", lambda cmd: 1)
+    ok, motivo = escama.rootless_disponible()
+    assert ok is False
+    assert "no sobreviven" in motivo
+
+
+def test_probe_se_limpia_antes_de_crear(tmp_path, monkeypatch):
+    """Una dummy huerfana de una corrida previa no debe dar falso negativo."""
+    p = tmp_path / "escama-launch"
+    p.write_text("x")
+    os.chmod(p, 0o755)
+    monkeypatch.setattr(escama, "LAUNCHER", str(p))
+    monkeypatch.setattr(escama.os, "geteuid", lambda: _EUID)
+    ops = []
+    monkeypatch.setattr(escama, "_run_sin_sudo",
+                        lambda cmd: ops.append(" ".join(cmd)) or 0)
+    escama.rootless_disponible()
+    assert "link del" in ops[0], f"la primera operacion debe limpiar: {ops[0]}"
+
+
+def test_run_sin_sudo_no_antepone_sudo(monkeypatch):
+    """_run_sin_sudo debe llamar a subprocess.run SIN el auto-sudo de run():
+    bajo sudo el kernel no concede las file capabilities y la probe miente."""
+    vistos = []
+
+    class R:
+        returncode = 0
+
+    def fake_subprocess_run(cmd, **kw):
+        vistos.append(cmd)
+        return R()
+    monkeypatch.setattr(escama.subprocess, "run", fake_subprocess_run)
+    rc = escama._run_sin_sudo(["/opt/escama/escama-launch", "ip", "link"])
+    assert rc == 0
+    assert vistos[0][0] == "/opt/escama/escama-launch", vistos
+
+
+def test_relaunch_marca_el_guard_de_entorno(monkeypatch):
+    """Re-ejecutar por el launcher marca ESCAMA_VIA_LAUNCHER: sin ese guard el
+    core re-lanzado vuelve a entrar al gate y se cicla (cuelgue medido)."""
+    p = os.path.join(RAIZ_REPO, "opt", "escama", "escama.py")
+    with open(p) as f:
+        src = f.read()
+    assert "ESCAMA_VIA_LAUNCHER" in src, "falta el guard anti-ciclo"
+    assert '"core"' in src, "el re-lanzado debe usar el modo core del launcher"
+
+
+def test_preflight_reporta_rootless(monkeypatch, capsys):
+    monkeypatch.setattr(escama, "preflight", lambda: {
+        "estado": "completa", "componentes": {}, "faltan": [],
+        "version_repo": "1", "version_instalada": "1"})
+    monkeypatch.setattr(escama, "rootless_disponible",
+                        lambda: (False, "falta el launcher"))
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    escama.do_preflight()
+    out = capsys.readouterr().out
+    assert "Rootless: NO DISPONIBLE" in out
+    assert "falta el launcher" in out, "el preflight debe nombrar la causa"

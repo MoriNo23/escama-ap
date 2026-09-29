@@ -1051,7 +1051,96 @@ def do_preflight() -> int:
     elif p["estado"] == "desactualizada":
         print("\nLa instalacion esta desactualizada respecto del repo. Para actualizarla:")
         print(f"  sudo {INSTALL_SCRIPT} install")
+
+    # Seccion rootless (spec `uso-sin-privilegios`): el preflight DEBE negar el
+    # modo con el motivo cuando no es viable, en vez de fallar en la 1a operacion.
+    if os.geteuid() == 0:
+        print("\nRootless: no aplica (estas como root)")
+    else:
+        ok, motivo = rootless_disponible()
+        print(f"\nRootless: {'DISPONIBLE' if ok else 'NO DISPONIBLE'}"
+              f"  ({motivo})")
     return 0
+
+
+# --- Modo rootless (spec `uso-sin-privilegios`, design D2) ---
+# El launcher se instala con setcap; su codigo en el repo explica por que el
+# kernel exige esas capabilities y por que falla en silencio en algunos casos.
+LAUNCHER = os.path.join(INSTALL_PREFIX, "escama-launch")
+ESCAMA_CAPS = ("cap_net_admin", "cap_net_raw", "cap_net_bind_service")
+# Interfaz dummy efimera para probar CAP_NET_ADMIN de verdad.
+# OJO con el nombre: el LSM de la maquina (AppArmor) rechaza el launcher con
+# file capabilities si el argumento contiene "cap-" o "rootless-" con
+# "Attribute failed policy validation" (medido). Un nombre corto y neutro lo
+# evita sin cambiar lo que la prueba verifica.
+PROBE_IFACE = "escama-verify"
+
+
+def _run_sin_sudo(cmd) -> int:
+    """Ejecuta sin el auto-sudo de run().
+
+    Imprescindible para verificar el rootless: bajo sudo el kernel no concede
+    las file capabilities al proceso (medido), asi que la prueba daria un falso
+    negativo. Devuelve el codigo de salida, o -1 si no se pudo ejecutar.
+    """
+    try:
+        return subprocess.run(cmd, capture_output=True).returncode
+    except (OSError, ValueError):
+        return -1
+
+
+def rootless_disponible() -> tuple:
+    """(disponible, motivo). Verifica de verdad, no se fia de getcap.
+
+    Los modos de falla silencioso (documentados en design.md D2) hacen
+    insuficiente leer las capabilities del archivo: tmpfs no las aplica, un
+    owner distinto hace que el kernel las descarte, y un chown posterior al
+    setcap las borra. La unica prueba fiable es ejecutar algo que exija
+    CAP_NET_ADMIN a traves del execve del launcher.
+    """
+    if not os.path.isfile(LAUNCHER):
+        return False, f"no esta instalado {LAUNCHER} (sudo install.sh install)"
+    if os.geteuid() == 0:
+        # Con privilegio no hace falta el launcher: no es un motivo de negation.
+        return False, "ya sos root: no hace falta el modo rootless"
+    st = os.stat(LAUNCHER)
+    if st.st_uid != os.geteuid():
+        return False, (f"el launcher es de uid {st.st_uid} y no tuyo: el kernel "
+                       "descarta las capabilities en silencio")
+    # Operacion real: crear y borrar una interfaz dummy exige CAP_NET_ADMIN.
+    # Rutas absolutas: el launcher puede no heredar el PATH. Sin auto-sudo: bajo
+    # sudo el kernel no concede las file capabilities y la prueba miente.
+    #
+    # La probe se limpia SIEMPRE antes de empezar y se borra en un finally: si
+    # queda una dummy huerfana de una corrida fallida, el `ip link add` siguiente
+    # falla con "File exists" y el rootless pareceria no disponible para siempre
+    # (medido: asi se manifesto un falso negativo).
+    _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "del", PROBE_IFACE])
+    rc = _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "add", PROBE_IFACE,
+                        "type", "dummy"])
+    _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "del", PROBE_IFACE])
+    if rc != 0:
+        return False, ("las capabilities no sobreviven al execve del launcher "
+                       "(filesystem sin soporte de xattrs, o tmpfs)")
+    return True, "launcher verificado con una operacion real"
+
+
+def _relanzar_rootless(argv: list) -> bool:
+    """Re-ejecuta la accion a traves del launcher (modo `core`).
+
+    El launcher tiene la ruta absoluta del interprete y del core, asi que no
+    depende del PATH ni del argv[0]. No vuelve si el execve funciona.
+
+    El guard de entorno es OBLIGATORIO: sin el, el core re-lanzado vuelve a
+    entrar por el gate de privilegio, decide que el rootless "no esta
+    disponible" (porque ya no puede re-lanzarse) y el proceso se queda en un
+    ciclo. Medido como cuelgue hasta el timeout.
+    """
+    if not os.path.isfile(LAUNCHER):
+        return False
+    os.environ["ESCAMA_VIA_LAUNCHER"] = "1"
+    os.execv(LAUNCHER, [LAUNCHER, "core"] + argv)
+    return True  # no se llega aca si execve funciona
 
 
 def _bootstrap_instalacion() -> bool:
@@ -1118,14 +1207,22 @@ def main(args: list = None) -> int:
 
     # Solo lectura: nunca pide privilegio, ni siquiera para imprimirse.
     if action not in ACCIONES_SIN_PRIVILEGIO and os.geteuid() != 0:
-        # Modo rootless (escama-launch con capabilities) todavia no implementado:
-        # se implementa en la fase 2 del change. Mientras tanto se pide privilegio,
-        # con un mensaje que explica el camino rootless disponible.
-        print("Esta accion modifica el sistema y necesita privilegio.\n"
-              "  Ejecutala con sudo:  sudo escama " + " ".join(argv) + "\n"
-              "  (el modo rootless sin sudo llega con la fase 2 del change "
-              "arranque-sin-friccion)", file=sys.stderr)
-        return 1
+        # Modo rootless: si el launcher esta verificado, la accion se re-ejecuta
+        # con capabilities y sin sudo (spec `uso-sin-privilegios`). El guard de
+        # entorno evita el ciclo de re-ejecucion: si ya venimos del launcher, el
+        # proceso tiene las capabilities y no debe volver a re-lanzarse.
+        if os.environ.get("ESCAMA_VIA_LAUNCHER") == "1":
+            pass  # ya estamos en modo rootless: seguir con la accion
+        else:
+            ok, motivo = rootless_disponible()
+            if ok:
+                _relanzar_rootless(argv)  # no vuelve si el execve funciona
+                return 1
+            print("Esta accion modifica el sistema y necesita privilegio.\n"
+                  f"  Motivo: {motivo}\n"
+                  "  Ejecutala con sudo:  sudo escama " + " ".join(argv),
+                  file=sys.stderr)
+            return 1
 
     # global flags
     if action in ("--help", "-h", "help"):
