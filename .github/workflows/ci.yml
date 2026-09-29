@@ -1,0 +1,61 @@
+# CI de escama-ap (change arranque-sin-friccion, design D7).
+#
+# Dos jobs separados por costo (ver D7):
+#  - tests: la suite completa (~25 s). Gate de push/PR a master.
+#  - mutmut: mutation testing, SOLO manual (workflow_dispatch): ~2200 mutantes
+#    tardan 30+ min y su resultado es tendencia, no gate.
+#
+# La suite es segura en un runner ajeno POR CONSTRUCCION: un fixture autouse
+# bloquea subprocess en toda la suite, asi que un test que se filtre falla con
+# el comando que intento ejecutar en vez de tocar el runner.
+#
+# Los triggers son del workflow entero (no por job), por eso cada job filtra
+# con if: github.event_name.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    # en push/PR; NO en el disparo manual (ese es del job mutmut)
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          # la version del repo (setup.cfg: python_version = 3.13)
+          python-version: '3.13'
+      - name: Instalar pytest
+        run: python -m pip install --upgrade pip pytest
+      - name: Suite
+        # SIEMPRE el path explícito: mutants/tests/ comparte basename con la
+        # suite y rompe la coleccion de pytest (pitfall documentado en
+        # AGENTS.md). No usar `python3 -m pytest` a secas.
+        run: python3 -m pytest tests/test_escama.py -q
+
+  mutmut:
+    # solo cuando se dispara a mano desde la pestaña Actions
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # local tarda 30+ min; el corte evita quemar minutos si algo cuelga
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Instalar mutmut
+        # la misma version que usa el host (mutmut 3.7.0), para que el
+        # setup.cfg significue lo mismo en CI y en local
+        run: python -m pip install --upgrade pip mutmut==3.7.0
+      - name: Mutation testing
+        # lee setup.cfg (source_paths, tests_dir, command)
+        run: mutmut run
