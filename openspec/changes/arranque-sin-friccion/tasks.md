@@ -1,0 +1,50 @@
+# Tasks
+
+## 1. Fase 0 — Investigación: documentación oficial ANTES de cualquier spike
+
+> Regla de este change (ver proposal.md): el spike confirma, no descubre. Cada
+> decisión de mecanismo MUST citar su fuente.
+
+- [ ] 1.1 Leer la documentación oficial de capabilities y registrar en `design.md` la receta de preservación a través de `execve`, citando cada regla: `capabilities(7)` §"Transformation of capabilities during execve()" (`P'(inheritable) = P(inheritable)`), §"Programmatically adjusting capability sets" (sumar al inheritable sin `CAP_SETPCAP`), §Ambient (invariante permitted **e** inheritable), §"Safety checking for capability-dumb binaries" (owner), `execve(2)` (caps ignoradas en scripts con shebang), `PR_CAP_AMBIENT(2const)`. Verificar: `design.md` D2 cita fuente por regla y no afirma nada sin respaldo
+- [ ] 1.2 Investigar si `AmbientCapabilities=` de systemd, `setpriv`, `capsh` o `systemd-run` resuelven el CLI interactivo sin launcher, y documentar con cita por qué se descartan o se eligen. Verificar: la sección de alternativas de D2 nombra la fuente de la limitación de cada una
+- [ ] 1.3 Investigar los otros tres frentes con la misma profundidad y documentar: (a) rooting de dnsmasq sin root (`--user`, uid, `CAP_NET_BIND_SERVICE` para el 67); (b) `nmcli device set managed no` sin root (polkit de NetworkManager: qué autoriza y qué no); (c) `sysctl net.ipv4.ip_forward` escribible sin `CAP_NET_ADMIN` en el init netns. Verificar: las tres respuestas están en `design.md` con su fuente
+- [ ] 1.4 Registrar en `design.md` (riesgos) el resultado de la investigación, incluida la receta ya verificada en esta máquina, para que la implementación parta de hechos y no de hipótesis. Verificar: la sección de riesgos refleja lo investigado + lo medido
+
+## 2. Fase 0b — Spike de confirmación de la receta investigada
+
+- [ ] 2.1 Confirmar en esta máquina la receta de D2 tal como quedó documentada en 1.1: gcc presente, xattrs en el FS destino, `setcap`/`getcap` disponibles, **owner del launcher correcto** (la condición que hizo fallar el primer intento en silencio), y una operación de red real a través del `execve` (`iptables -L` y `ip link add`/cleanup). Verificar: las tres operaciones devuelven rc=0 como usuario normal; si algo falla, PARAR y volver a 1.1 antes de seguir
+- [ ] 2.2 Anotar en `design.md` el resultado del spike con lo medido. Verificar: coincide con lo que D2 afirma
+
+## 3. Fase 1 — Versionado por cambios (D1)
+
+- [ ] 3.1 Crear la fuente única de versión (archivo de una línea en la raíz) y hacer que `escama.py`, `escama-tui.py` e `install.sh` la lean en runtime; eliminar los literales `VERSION = "1.0.0"` duplicados. Verificar: los tres `--version` reportan lo mismo y un `grep` no encuentra la versión como literal en los ejecutables
+- [ ] 3.2 Escribir `CHANGELOG.md` con la serie 0.x retrospectiva por épocas (0.1 núcleo, 0.2 VPN egress, 0.3 selección de canal, 0.4 instalación/autostart) + entrada de este change. Verificar: el archivo reconstruye qué versión tenía cada comportamiento
+- [ ] 3.3 Test de coherencia: los tres puntos de entrada leen la misma fuente. Verificar: test nuevo en `python3 -m pytest tests/test_escama.py -q` en verde
+- [ ] 3.4 Documentar la disciplina de bump semver por change (un paso en el `tasks.md` de cada change + entrada de CHANGELOG) en `AGENTS.md`. Verificar: la sección existe en AGENTS.md
+
+## 4. Fase 1 — Auto-instalación y gate por subcomando (D5, D4-lectura)
+
+- [ ] 4.1 Implementar `preflight()`: clasificar la instalación como "instalada" / "desactualizada" / "faltante" comparando symlinks, código en `/opt/escama`, env, units y versión contra el repo. Verificar: tests con los tres estados simulados
+- [ ] 4.2 Bootstrap: al detectar instalación faltante en una acción mutante, delegar en `install.sh install` con un mensaje previo y un único prompt; re-verificar y continuar la acción original. Rechazo → comando manual + error claro. Verificar: tests de acepta / rechaza / un-solo-prompt
+- [ ] 4.3 Gate de root por subcomando: `--help`/`--version`/`status` sin privilegio; mutantes vía rootless o escalación de un prompt. Verificar: tests simulando `geteuid` no-root por subcomando
+- [ ] 4.4 TUI: leer la versión de la fuente única y pasar su gate a por-acción. Verificar: `escama-tui --version` coincide con `escama --version` sin root
+
+## 5. Fase 2 — Rootless real (D2, D3, D4)
+
+- [ ] 5.1 Escribir `escama-launch.c` (launcher mínimo que preserva capabilities al ejecutar el núcleo) y compilarlo en `install.sh`; aplicar `setcap cap_net_admin,cap_net_raw,cap_net_bind_service=ep`. Verificar: `getcap` muestra las tres capabilities y el launcher ejecuta el núcleo
+- [ ] 5.2 Resolver rutas de runtime (pidfile, log, state) por XDG cuando no hay privilegio, manteniendo las rutas de sistema cuando sí lo hay; loguear y mostrar la ruta efectiva en `status`. Verificar: tests de resolución root vs no-root + ruta en el log
+- [ ] 5.3 Unit de usuario de systemd (template versionado) + `install.sh enable --user`. Verificar: `systemctl --user` lista la unit; el AP levanta al iniciar sesión sin privileged unit
+- [ ] 5.4 Degradación explícita: `rmmod`/`modprobe` y `nmcli device set managed no` sin capability/autorización → mensaje claro del motivo, nunca "OK" falso ni silencio. Verificar: tests que simulan el fallo y verifican el mensaje
+- [ ] 5.5 Preflight rootless completo (toolchain, xattr, `setcap` efectivo post-exec, unit de usuario) que **niegue** el modo con el motivo cuando algo falte. Verificar: preflight en máquina sin gcc (simulado) dice "no disponible" y nombra la condición
+
+## 6. Fase 3 — QA y cierre
+
+- [ ] 6.1 Suite completa con path explícito + `mutmut run`; tests nuevos verdes y mutantes del código nuevo killed o documentados. Verificar: `python3 -m pytest tests/test_escama.py -q` en verde y mutmut sin regresiones relevantes
+- [ ] 6.2 Documentar en `README.md`: versión/changelog, preflight, rootless vs sudo, unit de usuario. Verificar: secciones presentes
+- [ ] 6.3 Verificación end-to-end del camino rootless en esta máquina: instalar, preflight en verde, y `status`/`restart` ejecutados **sin sudo** con éxito real. Verificar: los tres comandos corrieron sin sudo
+- [ ] 6.4 Commit final por tipo + bump minor de versión + entrada de CHANGELOG de este change. Verificar: los tres `--version` muestran la versión nueva y el CHANGELOG tiene la entrada
+
+## 7. Externo — stonepi (cuando el change se aplique en esa máquina)
+
+- [ ] 7.1 En stonepi: `sudo ./install.sh install`, repetir el spike de viabilidad (gcc/xattr/setcap) y `escama preflight`. Verificar: preflight en verde o con el motivo de la limitación; el AP queda operable en el modo disponible
+- [ ] 7.2 En stonepi: decidir si el AP queda con unit de sistema (privilegiada) o unit de usuario, y verificar el arranque. Verificar: `status` muestra el modo efectivo tras reiniciar sesión
