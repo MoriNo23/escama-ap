@@ -1414,3 +1414,122 @@ def test_kill_procs_no_aborta_si_el_pidfile_no_se_borra(monkeypatch, tmp_path):
         raise PermissionError("denegado")
     monkeypatch.setattr(escama.os, "remove", boom)
     escama._kill_procs()  # no debe lanzar
+
+
+# ---------------------------------------------------------------------------
+# Degradacion explicita (spec `uso-sin-privilegios`): rmmod/modprobe y nmcli
+# no se omiten en silencio ni se reportan como exitosos
+# ---------------------------------------------------------------------------
+
+def _fake_run(monkeypatch, fallan=(), ok=()):
+    """fake_run donde los comandos de `fallan` devuelven rc!=0 con stderr."""
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        nombre = " ".join(cmd[:2]) if len(cmd) > 1 else cmd[0]
+        if nombre in fallan or (nombre, " ".join(cmd)) in fallan:
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = "Operation not permitted"
+            return R()
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    return calls
+
+
+def test_rmmod_fallido_se_reporta_con_motivo(monkeypatch, tmp_path, capsys):
+    """Sin CAP_SYS_MODULE el reload no se puede hacer: se DEBE decir, con el
+    motivo real, no seguir en silencio."""
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    _fake_run(monkeypatch, fallan=("rmmod 8192eu",))
+    monkeypatch.setattr(escama.time, "sleep", lambda s: None)
+    escama.reload_module_if_needed("wn8200nd")
+    out = capsys.readouterr().out
+    assert "DEGRADADO" in out, "no debe omitir el fallo en silencio"
+    assert "rmmod" in out, "debe nombrar el comando que fallo"
+    assert "CAP_SYS_MODULE" in out, "debe explicar por que"
+
+
+def test_modprobe_fallido_se_reporta(monkeypatch, capsys):
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    _fake_run(monkeypatch, fallan=("modprobe 8192eu",))
+    monkeypatch.setattr(escama.time, "sleep", lambda s: None)
+    escama.reload_module_if_needed("wn8200nd")
+    out = capsys.readouterr().out
+    assert "DEGRADADO" in out and "modprobe" in out
+
+
+def test_reload_exitoso_no_inventa_degradacion(monkeypatch, capsys):
+    """Si todo va bien, no debe decir DEGRADADO."""
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    _fake_run(monkeypatch)
+    monkeypatch.setattr(escama.time, "sleep", lambda s: None)
+    escama.reload_module_if_needed("wn8200nd")
+    out = capsys.readouterr().out
+    assert "DEGRADADO" not in out
+    assert "recargado" in out
+
+
+def test_reload_no_hace_nada_si_el_modo_ap_ya_esta(monkeypatch):
+    """Si '* AP' esta presente, no toca nada (no es un fallo)."""
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = "* managed\n* AP\n"
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    escama.reload_module_if_needed("wn8200nd")
+    assert not any(c[:1] == ["rmmod"] for c in calls)
+
+
+def test_nmcli_managed_no_fallido_se_reporta(monkeypatch, tmp_path, capsys):
+    """Si polkit no autoriza, se informa con el motivo y se dice si impide el
+    arranque. Antes se ignoraba el resultado en silencio."""
+    monkeypatch.setattr(escama, "preflight", lambda: {
+        "estado": "completa", "componentes": {}, "faltan": [],
+        "version_repo": "1", "version_instalada": "1"})
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    monkeypatch.setattr(escama, "load_env", lambda: {
+        "AP_IFACE": "wn8200nd", "WAN_IFACE": "stonepi", "SSID": "escama",
+        "CHANNEL": "6", "CHANNEL_MODE": "auto", "HW_MODE": "g",
+        "AP_IP": "10.42.1.1", "AP_CIDR": "24", "AP_SUBNET": "10.42.1.0/24",
+        "DHCP_START": "10.42.1.10", "DHCP_END": "10.42.1.254",
+        "DHCP_LEASE": "12h", "WPA_PASSPHRASE": "x", "DNS1": "8.8.8.8",
+        "DNS2": "8.8.4.4"})
+    _fake_run(monkeypatch, fallan=("nmcli device",))
+    monkeypatch.setattr(escama, "generar_hostapd", lambda c: None)
+    monkeypatch.setattr(escama, "generar_dnsmasq", lambda c, kind="": None)
+    monkeypatch.setattr(escama, "_kill_procs", lambda: None)
+    monkeypatch.setattr(escama, "_ensure_ip", lambda *a: None)
+    monkeypatch.setattr(escama.time, "sleep", lambda s: None)
+    escama.do_start()
+    out = capsys.readouterr().out
+    assert "DEGRADADO" in out
+    assert "NetworkManager" in out
+
+
+def test_motivo_fallo_incluye_el_stderr_real():
+    class R:
+        returncode = 1
+        stdout = ""
+        stderr = "Error: Failed to open file\nlinea2"
+    m = escama._motivo_fallo(R(), "rmmod 8192eu")
+    assert "rmmod 8192eu" in m
+    assert "Failed to open file" in m
+    assert "linea2" not in m, "solo la primera linea del error"

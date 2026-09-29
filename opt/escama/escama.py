@@ -745,20 +745,44 @@ def _ap_phy() -> str:
 
 def reload_module_if_needed(ap: str) -> None:
     """If hostapd will fail with -95 (Operation not supported), the module in
-    memory lacks CONFIG_AP_MODE. Reload the DKMS module to fix."""
+    memory lacks CONFIG_AP_MODE. Reload the DKMS module to fix.
+
+    Degradacion explicita (spec `uso-sin-privilegios`): recargar modulos exige
+    CAP_SYS_MODULE, que el modo rootless NO tiene. Si el reload falla, se dice
+    con el motivo: nunca se omite en silencio ni se reporta como exitoso.
+    """
     if not iface_exists(ap):
         return
     phy = _ap_phy()
     if not phy:
         return
     p = run(["iw", "phy", phy, "info"], capture=True)
-    if p.returncode == 0 and "* AP" not in (p.stdout or ""):
-        log(f"AP mode NOT exposed by {ap}; reloading 8192eu DKMS module")
-        run(["rmmod", "8192eu"], check=False)
-        time.sleep(1)
-        run(["depmod", "-a"], check=False)
-        run(["modprobe", "8192eu"], check=False)
-        time.sleep(2)
+    if p is None or p.returncode != 0 or "* AP" in (p.stdout or ""):
+        return
+    log(f"AP mode NOT exposed by {ap}; reloading 8192eu DKMS module")
+    r = run(["rmmod", "8192eu"], check=False)
+    if r is None or r.returncode != 0:
+        motivo = _motivo_fallo(r, "rmmod 8192eu")
+        log(f"DEGRADADO: no pude recargar el modulo del driver ({motivo}).")
+        log("  Requiere CAP_SYS_MODULE: no esta en el modo rootless. "
+            "Cargalo a mano con sudo: modprobe -r 8192eu && modprobe 8192eu")
+        return
+    time.sleep(1)
+    run(["depmod", "-a"], check=False)
+    r = run(["modprobe", "8192eu"], check=False)
+    if r is None or r.returncode != 0:
+        log(f"DEGRADADO: modprobe 8192eu fallo ({_motivo_fallo(r, 'modprobe')}). "
+            "El AP puede no levantar.")
+        return
+    time.sleep(2)
+    log("Modulo del driver recargado")
+
+
+def _motivo_fallo(r, cmd: str) -> str:
+    """Extrae el motivo real de un comando fallido (no un error generico)."""
+    err = ((getattr(r, "stderr", "") or "") + (getattr(r, "stdout", "") or "")).strip()
+    primera = err.splitlines()[0] if err else ""
+    return f"{cmd}: {primera}" if primera else f"{cmd}: sin salida de error"
 
 
 def generar_hostapd(cfg: dict) -> None:
@@ -882,7 +906,17 @@ def do_start() -> int:
         log(f"WARN: WAN iface {wan} no existe. El AP no tendra internet saliente.")
 
     # free iface from NM (AP iface only)
-    run(["nmcli", "device", "set", ap, "managed", "no"], check=False)
+    # Quitarle la iface al gestor de red: sin esto NetworkManager puede
+    # reasignarla o pelear por el leasesfile. Es un requisito de autorizacion
+    # de polkit, no una capability: puede fallar incluso siendo root.
+    # Degradacion explicita (spec `uso-sin-privilegios`): si falla, se informa
+    # con el motivo y se dice si impide o no el arranque.
+    r = run(["nmcli", "device", "set", ap, "managed", "no"], check=False)
+    if r is None or r.returncode != 0:
+        log(f"DEGRADADO: no pude quitarle {ap} a NetworkManager "
+            f"({_motivo_fallo(r, 'nmcli device set managed no')}).")
+        log("  NM puede reasignar la interfaz. Si el AP no levanta, "
+            "desasignala a mano: sudo nmcli device set " + ap + " managed no")
     # reload module if AP mode missing (anti -95)
     reload_module_if_needed(ap)
 
