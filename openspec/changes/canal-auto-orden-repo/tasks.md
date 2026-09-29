@@ -22,10 +22,10 @@
 
 ## 4. Fase 3 — Orden del repo (docs y referencias)
 
-- [ ] 4.1 Mover los 4 análisis de la raíz (`DIAGNOSIS-FINAL.md`, `ROOT-CAUSE-SYNTHESIS.md`, `NETWORK-BINDING-ANALYSIS.md`, `VPN-TUNNEL-ANALYSIS.md`) a `docs/diagnostics/` (son untracked: `mv` + `git add`, nombres intactos) y actualizar las referencias a `DIAGNOSIS-FINAL.md` en `opt/escama/escama.py` a la nueva ruta. Verificar: la raíz queda solo con `README.md`/`AGENTS.md`/`install.sh`/`setup.cfg` y `grep -rn "DIAGNOSIS" opt/escama/escama.py` apunta a `docs/diagnostics/`
+- [x] 4.1 Mover los 4 análisis de la raíz (`DIAGNOSIS-FINAL.md`, `ROOT-CAUSE-SYNTHESIS.md`, `NETWORK-BINDING-ANALYSIS.md`, `VPN-TUNNEL-ANALYSIS.md`) a `docs/diagnostics/` (son untracked: `mv` + `git add`, nombres intactos) y actualizar las referencias a `DIAGNOSIS-FINAL.md` en `opt/escama/escama.py` a la nueva ruta. Verificar: la raíz queda solo con `README.md`/`AGENTS.md`/`install.sh`/`setup.cfg` y `grep -rn "DIAGNOSIS" opt/escama/escama.py` apunta a `docs/diagnostics/`
 - [x] 4.2 Crear `docs/VPN-EGRESS.md` (inglés) traduciendo `docs-es/VPN-EGRESS.md`. Verificar: el archivo existe y cubre los mismos temas que la versión española (~217 líneas)
 - [x] 4.3 `.gitignore`: agregar `.opencode/` y `.pi/` (tooling de harness) y quitar el patrón `/var/log/escama-*.log` (path absoluto que nunca matchea dentro del repo). Verificar: `git status --short` deja de listar `.opencode/` y `.pi/` como untracked
-- [ ] 4.4 Commits de la fase separados por tipo (`docs:`, `chore:`, en español, prefijo conventional). Verificar: `git status` limpio y `git log --oneline` refleja un commit por tipo de cambio
+- [x] 4.4 Commits de la fase separados por tipo (`docs:`, `chore:`, en español, prefijo conventional). Verificar: `git status` limpio y `git log --oneline` refleja un commit por tipo de cambio
 
 ## 5. Fase 4 — Ops: autostart (spec `instalacion`)
 
