@@ -6,8 +6,9 @@ __pycache__/
 # mutmut cache
 mutants/
 
-# local logs
-/var/log/escama-*.log
-
 # pytest cache
 .pytest_cache/
+
+# tooling de harness de agentes (OpenCode / Hermes-CLI local)
+.opencode/
+.pi/
