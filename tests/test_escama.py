@@ -1326,3 +1326,91 @@ def test_degradacion_nombra_el_motivo_real(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "uid 0 y no tuyo" in err, "debe nombrar el motivo real"
     assert "sudo escama start" in err, "debe dar la salida exacta"
+
+
+# ---------------------------------------------------------------------------
+# Rutas de runtime (spec `uso-sin-privilegios`, design D3): XDG sin root
+# ---------------------------------------------------------------------------
+
+def test_log_usa_xdg_sin_root(monkeypatch, tmp_path):
+    """Sin root el log va a XDG_STATE_HOME, no a /var/log."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    p = escama._log_path()
+    assert p.startswith(str(tmp_path / "state")), p
+    assert "escama-ap.log" in p
+    assert (tmp_path / "state" / "escama").is_dir(), "debe crear el directorio"
+
+
+def test_log_usa_var_log_con_root(monkeypatch):
+    """Con root se conservan las rutas de sistema (compatibilidad)."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    assert escama._log_path() == "/var/log/escama-ap.log"
+
+
+def test_lease_usa_var_lib_misc_con_root(monkeypatch):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    assert escama._lease_path() == "/var/lib/misc/dnsmasq-escama.leases"
+
+
+def test_lease_cae_a_runtime_sin_root(monkeypatch, tmp_path):
+    """dnsmasq escribe el leasefile: sin root no puede usar /var/lib/misc."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    p = escama._lease_path()
+    assert p.startswith(str(tmp_path / "run")), p
+    assert (tmp_path / "run").is_dir()
+
+
+def test_runtime_dir_usa_xdg_runtime_sin_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    assert escama._runtime_dir() == str(tmp_path / "run")
+
+
+def test_runtime_dir_con_root_usa_run(monkeypatch):
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 0)
+    assert escama._runtime_dir() == "/run"
+
+
+def test_runtime_dir_cae_a_tmp_si_no_puede_crear(monkeypatch, tmp_path):
+    """Si el dir XDG no es escribible, cae a /tmp en vez de romper el arranque."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/proc/no-escribible/x")
+    d = escama._runtime_dir()
+    assert d.startswith("/tmp"), d
+
+
+def test_status_muestra_la_ruta_efectiva(monkeypatch, capsys, tmp_path):
+    """status expone la ruta real: sin esto no se distingue 'no arranco' de
+    'no tengo permiso'."""
+    monkeypatch.setattr(escama, "load_env", lambda: {
+        "AP_IFACE": "wn8200nd", "WAN_IFACE": "stonepi", "SSID": "escama",
+        "AP_IP": "10.42.1.1", "AP_CIDR": "24"})
+    monkeypatch.setattr(escama, "resolve_egress", lambda c: ("stonepi", "wan"))
+    monkeypatch.setattr(escama, "_read_state", lambda: {})
+    monkeypatch.setattr(escama, "list_tunnels", lambda: [])
+    monkeypatch.setattr(escama, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(escama, "LOG", str(tmp_path / "log.txt"))
+    monkeypatch.setattr(escama, "PIDFILE", str(tmp_path / "pid"))
+    escama.do_status()
+    out = capsys.readouterr().out
+    assert "Log:" in out and "Pidfile:" in out
+    assert str(tmp_path / "log.txt") in out
+    assert "Modo:" in out
+
+
+def test_kill_procs_no_aborta_si_el_pidfile_no_se_borra(monkeypatch, tmp_path):
+    """Con rootless el pidfile es del usuario; si el borrado falla (permisos),
+    stop no debe abortar con PermissionError."""
+    pid = tmp_path / "pid"
+    pid.write_text("123")
+    monkeypatch.setattr(escama, "PIDFILE", str(pid))
+    monkeypatch.setattr(escama, "run", lambda *a, **k: None)
+    monkeypatch.setattr(escama.time, "sleep", lambda s: None)
+
+    def boom(_p):
+        raise PermissionError("denegado")
+    monkeypatch.setattr(escama.os, "remove", boom)
+    escama._kill_procs()  # no debe lanzar

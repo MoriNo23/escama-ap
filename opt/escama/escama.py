@@ -51,10 +51,60 @@ CONFIG_DIR = "/etc/escama"
 ENV_FILE = os.path.join(CONFIG_DIR, "escama.env")
 HOSTAPD_CONF = "/etc/hostapd/hostapd-escama.conf"
 DNSMASQ_CONF = "/etc/dnsmasq-escama.conf"
-LOG = "/var/log/escama-ap.log"
-LEASE_FILE = "/var/lib/misc/dnsmasq-escama.leases"
-PIDFILE = "/run/dnsmasq-escama.pid"
-STATE_FILE = "/run/escama-egress.state"
+
+
+# --- Rutas de runtime (spec `uso-sin-privilegios`, design D3) ---
+# El estado de runtime va a rutas de root (/var, /run) cuando el proceso es root,
+# y a rutas del usuario (XDG) cuando no. Sin esto, el modo rootless no puede ni
+# escribir su log ni sus pidfile/state: no habria forma de distinguir "no tengo
+# permiso" de "no arranco".
+def _runtime_dir() -> str:
+    """Directorio de runtime: XDG_RUNTIME_DIR si el proceso no es root.
+
+    Con root se conservan las rutas de sistema (compatibilidad con lo que ya
+    opera y con los logs de /var/log que se vienen leyendo).
+    """
+    if os.geteuid() == 0:
+        return "/run"
+    d = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(
+        os.path.expanduser("~"), ".local", "state", "escama", "run")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        d = os.path.join("/tmp", f"escama-{os.geteuid()}")
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _log_path() -> str:
+    """Log: /var/log con root, XDG_STATE_HOME (o ~/.local/state) sin root."""
+    if os.geteuid() == 0:
+        return "/var/log/escama-ap.log"
+    d = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state")
+    d = os.path.join(d, "escama")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return os.path.join("/tmp", "escama-ap.log")
+    return os.path.join(d, "escama-ap.log")
+
+
+def _lease_path() -> str:
+    """Leasefile de dnsmasq: /var/lib/misc con root, dir de runtime sin root.
+
+    dnsmasq escribe el leasefile; con rootless no podria escribir en
+    /var/lib/misc, asi que cae al directorio de runtime del usuario.
+    """
+    if os.geteuid() == 0:
+        return "/var/lib/misc/dnsmasq-escama.leases"
+    return os.path.join(_runtime_dir(), "dnsmasq-escama.leases")
+
+
+LOG = _log_path()
+LEASE_FILE = _lease_path()
+PIDFILE = os.path.join(_runtime_dir(), "dnsmasq-escama.pid")
+STATE_FILE = os.path.join(_runtime_dir(), "escama-egress.state")
 
 # --- Installation (spec `auto-instalacion`) ---
 # Rutas de la instalacion canonica que produce install.sh. El nucleo solo las
@@ -775,7 +825,12 @@ def _kill_procs() -> None:
     run(["pkill", "-9", "-x", "hostapd"], check=False)
     run(["pkill", "-9", "-x", "dnsmasq"], check=False)
     if os.path.exists(PIDFILE):
-        os.remove(PIDFILE)
+        # En modo rootless el pidfile vive en el dir de runtime del usuario;
+        # sin este try el borrado lanzaria PermissionError y abortaria el stop.
+        try:
+            os.remove(PIDFILE)
+        except OSError:
+            pass
 
 
 def _ensure_ip(ap: str, ip_addr: str, cidr: str) -> None:
@@ -928,6 +983,11 @@ def do_status() -> int:
               " Corre: sudo escama egress")
     svc = run(["systemctl", "is-active", "escama-ap.service"], capture=True)
     print(f"Service:     {(svc.stdout or '').strip()}")
+    # Ruta de runtime efectiva: sin esto no se distingue "no arranco" de
+    # "no tengo permiso" al leer un log o un state (spec `uso-sin-privilegios`).
+    print(f"Modo:        {'root' if os.geteuid() == 0 else 'rootless (sin sudo)'}")
+    print(f"Log:         {LOG}")
+    print(f"Pidfile:     {PIDFILE}")
     return 0
 
 
