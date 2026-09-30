@@ -15,17 +15,46 @@
 - **WAN iface**: tiene internet (cliente de una red externa). Por defecto `stonepi`.
 - El software **nunca modifica la WAN iface** (regla de oro). Solo lee su ruta para masquerade.
 
+### 1.1 Modos y estado de runtime (a partir de 1.1.0)
+
+- **Dos modos de operación**: con `sudo` (el histórico, todo como root) o
+  **rootless** — `/opt/escama/escama-launch` es un launcher ELF que porta
+  `CAP_NET_ADMIN/NET_RAW/NET_BIND_SERVICE` y se las pasa al núcleo, así que
+  `start|stop|restart|egress` corren sin sudo. Tiene que ser ELF porque el
+  kernel ignora las file capabilities en scripts con shebang. Lo que no puede
+  ser rootless (recargar el módulo del driver exige `CAP_SYS_MODULE`, `nmcli`
+  exige autorización de NM) degrada con mensaje explícito, nunca en silencio.
+- **Preflight**: `escama preflight` comprueba la máquina antes de operar —
+  componentes, versión del repo vs instalada, y viabilidad rootless verificada
+  con una operación real (no con `getcap`). Solo lectura, corre sin privilegio.
+- **Las rutas de runtime dependen del privilegio**: con root,
+  log/pidfile/state/confs generados van a `/var` y `/etc`; sin root, a los dirs
+  XDG del usuario (`~/.local/state`, `XDG_RUNTIME_DIR`, `~/.config/escama`).
+  `escama.env` queda en `/etc` y solo se lee. `escama status` muestra las
+  rutas efectivas.
+- **Versionado**: fuente única en `VERSION`, leída en runtime por núcleo, TUI e
+  instalador (hardcodearla es un defecto con test en contra). Historial en `CHANGELOG.md`.
+- **Autostart**: unit de sistema privilegiada, o **unit de usuario**
+  (`install.sh enable --user`) que levanta el AP al iniciar sesión sin privilegio.
+- La tabla completa modo por modo vive en `README.md` ("Rootless vs sudo",
+  "Unit de usuario").
+
 ## 2. Archivos
 
 | Archivo | Rol |
 |---------|-----|
-| `opt/escama/escama.py` | Núcleo. Acciones: `start\|stop\|restart\|status\|reconnect\|genconfig` |
+| `opt/escama/escama.py` | Núcleo. Acciones: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|preflight` |
 | `opt/escama/escama-tui.py` | TUI whiptail. Edita `escama.env`, regenera confs |
+| `opt/escama/escama-launch.c` | Launcher ELF rootless (capabilities → núcleo); se compila a `/opt/escama/escama-launch` |
 | `etc/escama/escama.env` | **Única fuente de verdad** |
 | `etc/hostapd/hostapd-escama.conf` | Generado desde env. No editar a mano |
 | `etc/dnsmasq-escama.conf` | Generado desde env. No editar a mano |
 | `etc/systemd/system/escama-ap.service` | Unit systemd (`ExecStart=/opt/escama/escama.py start`) |
-| `tests/test_escama.py` | 19 unit tests, mocks de system calls |
+| `etc/systemd/user/escama-ap.service` | Unit de usuario — autostart sin sudo al iniciar sesión |
+| `etc/systemd/user/escama-egress.service` | Unit de usuario — watcher de egress en modo rootless |
+| `VERSION` | Fuente única de la versión, leída en runtime por los tres puntos de entrada |
+| `CHANGELOG.md` | Historial de versiones (0.x retrospectiva + semver por change) |
+| `tests/test_escama.py` | 105 unit tests, mocks de system calls (comando en §7) |
 | `setup.cfg` | Config mutmut |
 
 ## 3. `escama.env` (fuente de verdad)
@@ -91,10 +120,13 @@ sudo escama.py reconnect    # igual que restart, para usar tras re-enchufar
 ## 7. Testing
 
 ```bash
-PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 15 tests, mocked
-python3 -m mutmut run                                      # mutation testing
+python3 -m pytest tests/test_escama.py -q   # 105 tests, mockeados, ~22s
+~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
 ```
 Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.
+No es un dicho sino una garantía: un fixture `autouse` bloquea `subprocess`
+durante TODA la suite, así que un test que se filtre falla con el comando exacto
+que intentó ejecutar.
 
 ### Mutation testing (mutmut) — ciclo de mejora
 - Suite 1 (9 tests): 772 mutantes, ~19% killed. Reveló que `do_stop`, `do_status`,
@@ -110,6 +142,8 @@ Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200n
   masquerade dinámico, reload en -95, do_stop/do_status, wan_has_internet, main). Los
   supervivientes son parsing/logging no crítico. No se persiguió 80% por diminishing
   returns (requeriría tests quirúrgicos por cada rama de parsing de un .env trivial).
+- La tabla corrida por corrida (hasta la 5ª: 105 tests, 2846 mutantes, ≈43,1%
+  de los testeados killed) vive en `README.md`.
 Cubren: load_env, generate_configs (single source of truth), auto-detect WAN,
 reload en fallo -95, validación real type AP (pass y fail).
 

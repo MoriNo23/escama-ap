@@ -15,17 +15,46 @@
 - **WAN iface**: has internet (client of an external network). Defaults to `stonepi`.
 - The software **never modifies the WAN iface** (golden rule). It only reads its route for masquerade.
 
+### 1.1 Modes and runtime state (as of 1.1.0)
+
+- **Two operating modes**: with `sudo` (historical, everything as root) or
+  **rootless** — `/opt/escama/escama-launch` is an ELF launcher carrying
+  `CAP_NET_ADMIN/NET_RAW/NET_BIND_SERVICE` and passing them to the core, so
+  `start|stop|restart|egress` run without sudo. It must be an ELF because the
+  kernel ignores file capabilities on shebang scripts. What cannot be rootless
+  (driver module reload needs `CAP_SYS_MODULE`, `nmcli` needs NM authorization)
+  degrades with an explicit message, never silently.
+- **Preflight**: `escama preflight` checks the machine before operating —
+  components, repo-vs-installed version, and rootless viability verified with a
+  real operation (not `getcap`). Read-only, runs without privilege.
+- **Runtime paths depend on privilege**: as root, log/pidfile/state/generated
+  confs live in `/var` and `/etc`; without root they move to the user's XDG
+  dirs (`~/.local/state`, `XDG_RUNTIME_DIR`, `~/.config/escama`). `escama.env`
+  stays in `/etc` and is only read. `escama status` shows the effective paths.
+- **Versioning**: single source in `VERSION`, read at runtime by core, TUI and
+  installer (hardcoding it is a tested-against defect). History in `CHANGELOG.md`.
+- **Autostart**: privileged system unit, or **user unit**
+  (`install.sh enable --user`) which brings the AP up at session login without
+  privilege.
+- The full mode-vs-mode table lives in `README.md` ("Rootless vs sudo", "Unit
+  de usuario").
+
 ## 2. Files
 
 | File | Role |
 |------|------|
-| `opt/escama/escama.py` | Core. Actions: `start\|stop\|restart\|status\|reconnect\|genconfig` |
+| `opt/escama/escama.py` | Core. Actions: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|preflight` |
 | `opt/escama/escama-tui.py` | whiptail TUI. Edits `escama.env`, regenerates confs |
+| `opt/escama/escama-launch.c` | Rootless ELF launcher (capabilities → core); compiled to `/opt/escama/escama-launch` |
 | `etc/escama/escama.env` | **Single source of truth** |
 | `etc/hostapd/hostapd-escama.conf` | Generated from env. Do not edit by hand |
 | `etc/dnsmasq-escama.conf` | Generated from env. Do not edit by hand |
 | `etc/systemd/system/escama-ap.service` | systemd unit (`ExecStart=/opt/escama/escama.py start`) |
-| `tests/test_escama.py` | 19 unit tests, system-call mocks |
+| `etc/systemd/user/escama-ap.service` | User unit — autostart without sudo at session login |
+| `etc/systemd/user/escama-egress.service` | User unit — egress watcher in rootless mode |
+| `VERSION` | Single version source, read at runtime by the three entry points |
+| `CHANGELOG.md` | Version history (0.x retrospective + semver per change) |
+| `tests/test_escama.py` | 105 unit tests, system-call mocks (command in §7) |
 | `setup.cfg` | mutmut config |
 
 ## 3. `escama.env` (source of truth)
@@ -89,10 +118,13 @@ systemd `Restart=on-failure` only covers process death, not missing hardware.
 ## 7. Testing
 
 ```bash
-PYTHONPATH=opt/escama python3 -m pytest tests/test_escama.py -v   # 19 tests, mocked
-python3 -m mutmut run                                      # mutation testing
+python3 -m pytest tests/test_escama.py -q   # 105 tests, mocked, ~22s
+~/.local/bin/mutmut run                      # mutation testing (reads setup.cfg)
 ```
 Tests mock `run()`/`subprocess`/`os` → **never touch stonepi or wn8200nd**.
+It is not a convention but a guarantee: an `autouse` fixture blocks
+`subprocess` during the whole suite, so a leaking test fails with the exact
+command it tried to run.
 
 ### Mutation testing (mutmut) — improvement loop
 - Suite 1 (9 tests): 772 mutants, ~19% killed. Showed `do_stop`, `do_status`,
@@ -104,6 +136,8 @@ Tests mock `run()`/`subprocess`/`os` → **never touch stonepi or wn8200nd**.
   test inputs) and `log()` (string format). `run()` is the mocked boundary and does
   not count as a design survivor. The ~346 🙁 are timeouts from the `sleep` in
   start/stop (technique noise, not real survivors).
+- The full run-by-run table (up to the 5th run: 105 tests, 2846 mutants,
+  ≈43.1% of tested killed) lives in `README.md`.
 - Conclusion: ALL critical anti-error logic is covered (real `type AP` validation,
   dynamic masquerade, reload on -95, do_stop/do_status, wan_has_internet, main).
   Survivors are non-critical parsing/logging. 80% was not chased due to diminishing

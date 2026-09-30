@@ -18,13 +18,11 @@ fuente de lógica: `opt/escama/escama.py`. La config vive en `etc/escama/escama.
 
 ## Build & test
 Desde la raíz del repo:
-  python3 -m pytest tests/test_escama.py -q        # 35 tests, ~16s, sin root
+  python3 -m pytest tests/test_escama.py -q        # 105 tests, ~22s, sin root
 Los tests mockean `run()`/`os`/`subprocess` → NO tocan `stonepi`/`wn8200nd`.
   mutmut run                                       # lee setup.cfg (source_paths + tests_dir)
 NO corras `python3 -m pytest` (sin path): `mutants/tests/test_escama.py` tiene el mismo
 basename y rompe la colección (import mismatch). Usa siempre el path explícito.
-README está desactualizado: dice "15 tests" y sugiere `PYTHONPATH=opt/escama`
-(innecesario; el test ya hace `sys.path.insert` a la raíz). La cifra real es 35.
 
 ## Conventions
 - Commits: español, lowercase, prefijo conventional — `feat(scope):`, `fix+feat:`,
@@ -61,7 +59,7 @@ README está desactualizado: dice "15 tests" y sugiere `PYTHONPATH=opt/escama`
   `WAN_IFACE=wn8200nd` (invertidos vs DEFAULTS). No asumas que `master` los refleja
   hasta que se haga commit.
 - `detect_ap_iface()`/`detect_wan_iface()` son nuevos (sin commitear en escama.py);
-  si los tocás, verificá que los 35 tests sigan en verde con el path explícito.
+  si los tocás, verificá que los 105 tests sigan en verde con el path explícito.
 
 ## Hermes skills (globales, `~/.hermes/skills/`)
 Skills versionadas del stack del host, instaladas a nivel global de Hermes (no en el repo).
@@ -77,7 +75,7 @@ de tarea pero la carga explícita es obligatoria en este proyecto. Paquete orige
 | `iproute2-6-15` | iproute2 6.15.0 + libbpf 1.5.0 — `ip`, rutas, políticas |
 | `whiptail-0-52-25` | whiptail/newt 0.52.25 — solo TUI `escama-tui.py` |
 | `systemd-257` | systemd 257.13 — units `escama-ap.service`, `escama-egress.service` |
-| `pytest-9-0-3` | pytest 9.0.3 — suite `tests/test_escama.py`, 35 tests |
+| `pytest-9-0-3` | pytest 9.0.3 — suite `tests/test_escama.py`, 105 tests |
 | `mutmut-3-7-0` | mutmut 3.7.0 — mutation testing, `setup.cfg` |
 
 Cada skill: `SKILL.md` + `references/{operational-reference,known-issues,sources}.md`.
