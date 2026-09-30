@@ -64,7 +64,7 @@
 
 ## 5. Cierre
 
-- [ ] 5.1 Commits tipo `docs:` (uno por grupo de archivos o uno por tema) +
+- [x] 5.1 Commits tipo `docs:` (uno por grupo de archivos o uno por tema) +
   push: la CI de GitHub corre sola en el push (job `tests` ya existe). **Sin
   bump semver** — el change no altera comportamiento (disciplina del repo).
   Verificar: el job `tests` de la corrida del push queda en verde
