@@ -199,9 +199,16 @@ así que un test que se filtre falla con el comando que intentó ejecutar.
 | 2ª | 15 | 775 | 264 / 158 ≈ 62.6% |
 | 3ª — `log()`/`load_env()` + fix de dir-creación | 19 | 783 | 279 / 158 ≈ 63.8% |
 | 4ª — selección de canal + split de generación de confs | 45 | 2170 | 676 / 1136 ≈ 37.3% de los testeados |
+| 5ª — arranque sin fricción: preflight, rootless, rutas XDG, versionado | 105 | 2846 | 1076 / 1417 ≈ 43.1% de los testeados (352 sin tests, 1 timeout) |
 
 - La 4ª corrida usa la base de conteo actual de mutmut 3.7 (2170 mutantes vs 783 de
   la 3ª): no comparable en valor absoluto con las filas anteriores.
+- La 5ª se re-corrió secuencialmente (`--max-children 1`) sobre los 260 no-killed
+  relevantes (248 del código nuevo + 12 de control): resultados idénticos → la
+  corrida paralela no produjo artefactos. Los no-killed del código nuevo quedaron
+  documentados por categoría (strings de display, fallbacks XDG sin test,
+  equivalentes prácticos, sonda rootless que ejecuta operaciones reales por diseño)
+  en el change `arranque-sin-friccion`.
 - Survived del feature nuevo (selección de canal): **equivalentes** — guardas
   redundantes re-rankeadas por `max()`, defaults que `load_env()` siempre mergea, y
   boundary `run()` (mockeado por diseño). Los mutantes significativos (umbral de
