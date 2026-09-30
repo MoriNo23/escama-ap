@@ -47,8 +47,11 @@ iptables -A FORWARD -i proton0 -o wn8200nd -m conntrack --ctstate ESTABLISHED,RE
 
 ### Option B — Split: clients via WAN, laptop via VPN
 
-Keep `MASQUERADE -o stonepi` and **exclude** the AP subnet from the tunnel
-(`ip rule add from 10.42.1.0/24 lookup main pref 90`, or Proton/WARP split tunnel).
+Keep `MASQUERADE -o stonepi` and **exclude** the AP traffic from the tunnel
+(`ip rule add iif <AP_IFACE> lookup main pref 90`, or Proton/WARP split tunnel).
+With `iif` (ingress interface) the rule matches only traffic entering via the
+AP: a `from <subnet>` selector would also hijack host-originated packets
+carrying that source IP (see `docs/diagnostics/DIAGNOSIS-FINAL.md` §4.1).
 
 - **Pro:** the VPN covers only you; clients keep full speed.
 - **Con:** clients browse with your real IP → if the point of the VPN is privacy

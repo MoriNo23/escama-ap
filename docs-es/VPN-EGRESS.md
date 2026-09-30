@@ -46,8 +46,11 @@ iptables -A FORWARD -i proton0 -o wn8200nd -m conntrack --ctstate ESTABLISHED,RE
 
 ### Opción B — Split: clientes por WAN, laptop por VPN
 
-Dejar el `MASQUERADE -o stonepi` y **excluir** el subnet del AP del tunnel
-(`ip rule add from 10.42.1.0/24 lookup main pref 90`, o en Proton/WARP el split tunnel).
+Dejar el `MASQUERADE -o stonepi` y **excluir** el tráfico del AP del tunnel
+(`ip rule add iif <AP_IFACE> lookup main pref 90`, o en Proton/WARP el split tunnel).
+Con `iif` (interfaz de ingreso) la regla matchea solo lo que entra por el AP: un
+selector `from <subnet>` atraparía también los paquetes originados en el host
+con esa IP de origen (ver `docs/diagnostics/DIAGNOSIS-FINAL.md` §4.1).
 
 - **Pro:** la VPN te cubre solo a vos; los clientes no pierden velocidad.
 - **Contra:** los clientes navegan con tu IP real → si el motivo de la VPN es
@@ -113,7 +116,11 @@ Si tenés varios tunnels arriba, fijalo a mano: `VPN_IFACE="proton0"`.
 3. `rp_filter=2` (loose) en `all` y en la iface del AP → el retorno por el tunnel
    no se descarta.
 4. **Policy routing** (`VPN_FORCE_ROUTE="yes"`): tabla `51821` con
-   `default dev <tunnel>` + `ip rule from <AP_SUBNET> lookup 51821 pref 100`.
+   `default dev <tunnel>` + `ip rule add iif <AP_IFACE> lookup 51821 pref 100`.
+   La regla matchea la **interfaz de ingreso** del AP (`iif`), no el subnet de
+   origen: un selector `from <subnet>` también secuestraría los paquetes
+   originados en el host con esa IP de origen hacia la tabla del tunnel
+   (ver `docs/diagnostics/DIAGNOSIS-FINAL.md` §4.1).
    Esto es **imprescindible con warp-cli**, que usa split tunnel + fwmark y no pone
    una default plana; sin la regla, los paquetes de los clientes ni llegan al tunnel.
 5. **MSS clamp** (`VPN_MSS_CLAMP="yes"`): `TCPMSS --clamp-mss-to-pmtu` en `mangle
@@ -170,7 +177,7 @@ así que el kill switch no mata a los clientes. DNS del tunnel: `10.2.0.1`.
 El nombre de la interfaz **es el nombre del archivo** (`protonnl.conf` → `protonnl`),
 no `wg0`. Por eso hay detección por *kind* `wireguard` y no solo por nombre. Ojo:
 `wg-quick` con `AllowedIPs = 0.0.0.0/0` usa policy routing con fwmark, y las rutas
-quedan en la tabla `51820` — nuestra tabla `51821` con `ip rule from <subnet>` tiene
+quedan en la tabla `51820` — nuestra tabla `51821` con `ip rule iif <AP_IFACE>` tiene
 precedencia por `pref 100` y resuelve el caso.
 
 ### warp-cli (Cloudflare WARP)
@@ -197,7 +204,7 @@ dejá `EGRESS_MODE="wan"` o fijá `VPN_IFACE` a otro tunnel.
 
 ```bash
 sudo escama status                      # ¿qué tunnel ve y qué aplicó?
-ip rule                                 # ¿está la regla from 10.42.1.0/24 lookup 51821?
+ip rule                                 # ¿está la regla iif <AP_IFACE> lookup 51821?
 ip route show table 51821               # ¿default dev <tunnel>?
 sudo iptables -t nat -S POSTROUTING     # ¿el MASQUERADE es -o <tunnel>?
 sudo iptables -S FORWARD                # ¿hay ACCEPT AP<->tunnel? ¿algún DROP de la VPN?
