@@ -5,7 +5,6 @@ Wants=network-online.target
 
 [Service]
 Type=forking
-ExecStartPre=/bin/bash -c 'nmcli device set $(/opt/escama/escama.py status >/dev/null 2>&1; grep -oP "AP iface:\\s*\\K\\S+" /etc/escama/escama.env || echo wn8200nd) managed no'
 ExecStart=/opt/escama/escama.py start
 ExecStop=/opt/escama/escama.py stop
 RemainAfterExit=yes

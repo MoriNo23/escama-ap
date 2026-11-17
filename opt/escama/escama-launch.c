@@ -33,7 +33,11 @@
  *     tmpfs no las aplica aunque getcap las muestre).
  *
  * Uso: escama-launch <comando> [args...]
- * Este launcher no interpreta argumentos propios: solo ejecuta lo que se le pasa.
+ * Whitelist: este launcher NO es un corredor generico de comandos; solo
+ * ejecuta el modo `core` (el nucleo escama) y la probe de ip(8) del rootless.
+ * Cualquier otro argv[1] se rechaza: darle caps de red a un binario arbitrario
+ * (`escama-launch /bin/bash`) regalaba una shell privilegiada a cualquier
+ * proceso del usuario.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -135,7 +139,17 @@ int main(int argc, char **argv)
         return 127;
     }
 
-    execv(argv[1], &argv[1]);
-    perror("escama-launch: execv");
-    return 127;
+    /* Whitelist: solo el modo "core" y la probe de ip(8) que usa el propio
+     * escama (ver cabecera). Todo lo demas se rechaza. */
+    if (strcmp(argv[1], "/usr/bin/ip") == 0) {
+        execv(argv[1], &argv[1]);
+        perror("escama-launch: execv ip");
+        return 127;
+    }
+    fprintf(stderr,
+            "escama-launch: comando no permitido: %s\n"
+            "Este launcher solo ejecuta el nucleo escama (`core`) y la probe\n"
+            "de ip(8): no es un corredor generico de comandos con caps.\n",
+            argv[1]);
+    return 2;
 }
