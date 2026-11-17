@@ -1,7 +1,12 @@
-# CI de escama-ap (change arranque-sin-friccion, design D7).
+# CI de escama-ap (reemplazo post-audit 2026-11).
 #
-# Dos jobs separados por costo (ver D7):
-#  - tests: la suite completa (~25 s). Gate de push/PR a master.
+# Cuatro jobs separados por costo:
+#  - tests: la suite completa (~15 s). Gate de push/PR a master.
+#  - lint:  shellcheck del instalador + py_compile del core y la TUI. Barato,
+#           corre en todo push/PR.
+#  - build: compila escama-launch.c con gcc y verifica el whitelist (el binario
+#           lleva CAP_NET_ADMIN/RAW/BIND_SERVICE: NO debe ejecutar argv[1]
+#           arbitrario). Publica el binario como artifact.
 #  - mutmut: mutation testing, SOLO manual (workflow_dispatch): ~2200 mutantes
 #    tardan 30+ min y su resultado es tendencia, no gate.
 #
@@ -40,6 +45,54 @@ jobs:
         # suite y rompe la coleccion de pytest (pitfall documentado en
         # AGENTS.md). No usar `python3 -m pytest` a secas.
         run: python3 -m pytest tests/test_escama.py -q
+
+  lint:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck del instalador
+        # -S error: solo errores reales, no estilo; el gate no debe ser ruidoso
+        run: shellcheck -S error install.sh
+      - name: py_compile del core y la TUI
+        # atrapa sintaxis rota sin depender de pytest (falla rapido, sin pip)
+        run: python3 -m py_compile opt/escama/escama.py opt/escama/escama-tui.py
+
+  build:
+    # compila en push/PR Y en el disparo manual (ese es para descargar el
+    # artifact del binario sin instalar nada)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compilar
+        # -Werror: el launcher maneja capabilities a mano; un warning aca
+        # suele ser un bug de memoria/permisos, no ruido
+        run: gcc -O2 -Wall -Werror -o escama-launch opt/escama/escama-launch.c
+      - name: Smoke: sin argumentos
+        # el uso vacio debe imprimir usage y salir 2 (antes de tocar caps)
+        run: |
+          ./escama-launch 2>salida.txt && exit 1 || rc=$?
+          test "$rc" = 2
+          grep -q "uso: escama-launch" salida.txt
+      - name: Capabilities (como en la install real)
+        # setcap exige que el owner sea el usuario que ejecuta: gcc lo compilo
+        # como runner, no hace falta chown (chown despues de setcap borra la
+        # xattr, pitfall documentado en el .c)
+        run: |
+          sudo apt-get install -y libcap2-bin
+          sudo setcap cap_net_admin,cap_net_raw,cap_net_bind_service+ep escama-launch
+      - name: Smoke: whitelist rechaza binarios arbitrarios
+        # con caps reales, argv[1] que no sea core/ip(8) debe ser rechazado:
+        # este es el fix del audit (execv arbitrario = shell con caps de red)
+        run: |
+          ./escama-launch /bin/true 2>salida.txt && exit 1 || rc=$?
+          test "$rc" = 2
+          grep -q "comando no permitido" salida.txt
+      - name: Publicar el binario
+        uses: actions/upload-artifact@v4
+        with:
+          name: escama-launch
+          path: escama-launch
 
   mutmut:
     # solo cuando se dispara a mano desde la pestaña Actions
