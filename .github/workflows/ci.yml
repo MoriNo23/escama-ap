@@ -68,7 +68,7 @@ jobs:
         # -Werror: el launcher maneja capabilities a mano; un warning aca
         # suele ser un bug de memoria/permisos, no ruido
         run: gcc -O2 -Wall -Werror -o escama-launch opt/escama/escama-launch.c
-      - name: Smoke: sin argumentos
+      - name: "Smoke: sin argumentos"
         # el uso vacio debe imprimir usage y salir 2 (antes de tocar caps)
         run: |
           ./escama-launch 2>salida.txt && exit 1 || rc=$?
@@ -81,7 +81,7 @@ jobs:
         run: |
           sudo apt-get install -y libcap2-bin
           sudo setcap cap_net_admin,cap_net_raw,cap_net_bind_service+ep escama-launch
-      - name: Smoke: whitelist rechaza binarios arbitrarios
+      - name: "Smoke: whitelist rechaza binarios arbitrarios"
         # con caps reales, argv[1] que no sea core/ip(8) debe ser rechazado:
         # este es el fix del audit (execv arbitrario = shell con caps de red)
         run: |
