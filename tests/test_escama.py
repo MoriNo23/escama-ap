@@ -459,6 +459,28 @@ def test_detect_vpn_iface_auto(monkeypatch):
     assert escama.detect_vpn_iface(cfg) == "tun0"
 
 
+def test_detect_wan_iface_detecta_usb_wifi_wlx(monkeypatch):
+    # Los dongles USB (p. ej. AIC8800D80) se llaman wlx<MAC>: el nombre no es
+    # filtro; la deteccion es por ruta default, por tipo de iface.
+    monkeypatch.setattr(
+        escama, "iface_exists", lambda i: i in ("stonepi", "wlx020304050607")
+    )
+    monkeypatch.setattr(escama, "iface_is_tunnel", lambda i: False)
+    monkeypatch.setattr(escama, "detect_ap_iface", lambda c: "stonepi")
+
+    def fake_run(cmd, check=True, capture=True):
+        class R:
+            returncode = 0
+            stdout = "default via 192.168.101.1 dev wlx020304050607 metric 600\n"
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    cfg = dict(escama.DEFAULTS, AP_IFACE="stonepi", WAN_IFACE="wn8200nd")
+    assert escama.detect_wan_iface(cfg) == "wlx020304050607"
+
+
 def test_resolve_egress_auto_uses_vpn(monkeypatch):
     monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "proton0")
     cfg = dict(escama.DEFAULTS, EGRESS_MODE="auto", WAN_IFACE="stonepi")
