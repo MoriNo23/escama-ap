@@ -29,7 +29,7 @@
   real operation (not `getcap`). Read-only, runs without privilege.
 - **Runtime paths depend on privilege**: as root, log/pidfile/state/generated
   confs live in `/var` and `/etc`; without root they move to the user's XDG
-  dirs (`~/.local/state`, `XDG_RUNTIME_DIR`, `~/.config/escama`). `escama.env`
+  dirs (`~/.local/state`, `XDG_RUNTIME_DIR`, `~/.config/escama`). `escama.toml`
   stays in `/etc` and is only read. `escama status` shows the effective paths.
 - **Versioning**: single source in `VERSION`, read at runtime by core, TUI and
   installer (hardcoding it is a tested-against defect). History in `CHANGELOG.md`.
@@ -44,9 +44,9 @@
 | File | Role |
 |------|------|
 | `opt/escama/escama.py` | Core. Actions: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|preflight` |
-| `opt/escama/escama-tui.py` | whiptail TUI. Edits `escama.env`, regenerates confs |
+| `opt/escama/escama-tui.py` | whiptail TUI. Edits `escama.toml`, regenerates confs |
 | `opt/escama/escama-launch.c` | Rootless ELF launcher (capabilities → core); compiled to `/opt/escama/escama-launch` |
-| `etc/escama/escama.env` | **Single source of truth** |
+| `etc/escama/escama.toml` | **Single source of truth** |
 | `etc/hostapd/hostapd-escama.conf` | Generated from env. Do not edit by hand |
 | `etc/dnsmasq-escama.conf` | Generated from env. Do not edit by hand |
 | `etc/systemd/system/escama-ap.service` | systemd unit (`ExecStart=/opt/escama/escama.py start`) |
@@ -57,7 +57,7 @@
 | `tests/test_escama.py` | 105 unit tests, system-call mocks (command in §7) |
 | `setup.cfg` | mutmut config |
 
-## 3. `escama.env` (source of truth)
+## 3. `escama.toml` (source of truth)
 
 ```ini
 AP_IFACE="wn8200nd"          # interface that emits the AP
@@ -71,7 +71,7 @@ AP_SUBNET="10.42.1.0/24"
 DHCP_START="10.42.1.10"
 DHCP_END="10.42.1.254"
 DHCP_LEASE="12h"
-WPA_PASSPHRASE="#[REMOVED]"
+WPA_PASSPHRASE=""
 DNS1="8.8.8.8"
 DNS2="8.8.4.4"
 ```
@@ -81,7 +81,7 @@ hostapd/dnsmasq confs. There is no second place to edit by hand.
 
 ## 4. `escama.py start` flow (anti-error design)
 
-1. Load `escama.env`.
+1. Load `escama.toml`.
 2. If `WAN_IFACE` empty → auto-detect from `ip route show default`; fallback `stonepi`.
 3. If AP iface missing → clear error "plug the adapter in", rc=1.
 4. `nmcli device set <AP> managed no` (free iface from NM).
@@ -99,7 +99,7 @@ hostapd/dnsmasq confs. There is no second place to edit by hand.
 
 ## 5. Swapping AP ↔ WAN (migration)
 
-Edit `escama.env`:
+Edit `escama.toml`:
 ```ini
 AP_IFACE="stonepi"
 WAN_IFACE="wn8200nd"

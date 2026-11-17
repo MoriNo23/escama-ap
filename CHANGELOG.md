@@ -9,6 +9,61 @@ declared a version, así que se reconstruyen por épocas a partir de los commits
 del repo. Desde 1.0.0 el bump es explícito: cada change que altera comportamiento
 incluye el bump en su `tasks.md` y una entrada acá.
 
+## 2.0.0 — 2026-11-17
+
+### Roto (breaking)
+- **La config ya no es `escama.env` (dotenv): es `/etc/escama/escama.toml`
+  (TOML).** El formato viejo `KEY="value"` con comentarios `#` ya era TOML
+  valido, asi que `install.sh install` migra con un rename automatico; si el
+  archivo no parsea como TOML, se avisa y queda intacto (fail-closed). El core
+  lee con `tomllib` (stdlib, Python 3.11+): un TOML con error de sintaxis
+  aborta con motivo en vez de aplicar media config (el parser viejo saltaba
+  lineas rotas en silencio). La TUI guarda con `save_config`, que reescribe
+  SOLO las claves conocidas y conserva comentarios y claves ajenas.
+
+### Seguridad
+- **Sin passphrase WPA por defecto en el repo**: la default era la passphrase
+  real del AP, publica en GitHub (sigue en el historial de git: rotar la
+  passphrase del AP es accion del usuario). Ahora `WPA_PASSPHRASE=""` y
+  `do_start` falla con error claro si esta vacia.
+- **`escama-launch` con whitelist**: solo ejecuta el modo `core` y la probe de
+  ip(8). Antes ejecutaba argv[1] arbitrario con CAP_NET_ADMIN/RAW/BIND_SERVICE:
+  `escama-launch /bin/bash` daba una shell con caps de red a cualquier proceso
+  del usuario.
+- `pkill -x dnsmasq` eliminado: el dnsmasq de escama se mata por pidfile (LXC
+  corre el suyo para lxcbr0 y un restart del AP lo mataba). hostapd sigue por
+  nombre: es exclusivo de escama.
+- `stop` ya no apaga el forwarding global: guarda el valor previo de
+  `net.ipv4.ip_forward` en el state (clave IPFWD) y lo restaura (LXC/libvirt
+  comparten ese sysctl y su NAT depende de el). Sin valor guardado, no toca.
+- `rp_filter=2` solo sobre la iface del AP (el kernel usa max(all, iface)),
+  nunca global y sin restaurar.
+- El unit de sistema pierde el ExecStartPre roto: grepeaba texto inexistente
+  en el env y caia a `wn8200nd` (iface ausente), con lo que el unit no booteaba.
+
+### Corregido
+- `run()` degrada a None si el binario falta o no es ejecutable
+  (FileNotFoundError/PermissionError): sin traceback en maquinas peladas.
+- Los comandos de SOLO LECTURA (`iw dev info`, `ip route show`, `ping`,
+  `systemctl is-active`, `ip -d link`) ya no piden sudo sin launcher
+  (`run(..., ro=True)`): `escama status` no pide password ni miente sin TTY.
+- El reload de modulo ya no hardcodea 8192eu: lee el driver real de sysfs
+  (`_driver_de`); con otro driver (p. ej. aic8800_fdrv) degrada con informacion
+  en vez de rmmod del modulo equivocado.
+- La TUI ya no duplica DEFAULTS ni la lista de tunnels (importa el core) y
+  recalcula el rango DHCP al cambiar IP/subred (antes dejaba el rango fuera de
+  la red nueva).
+- install.sh borra los residuos de la instalacion vieja en /opt/escama
+  (detect-iface.sh, start-ap.sh, stop-ap.sh, toggle-ap.sh, config-tui.sh,
+  cleanup-warp.sh, __pycache__).
+- Muerto: `module_has_ap_mode()` (nunca se llamaba) e `import shutil`.
+
+### CI
+- Job `lint`: shellcheck de install.sh + py_compile del core y la TUI.
+- Job `build`: compila escama-launch.c (gcc -O2 -Wall -Werror), verifica el
+  whitelist con capabilities reales y publica el binario como artifact.
+- `tests` (gate push/PR) y `mutmut` (manual) quedan igual.
+
 ## 1.1.0 — 2026-09-29
 
 ### Agregado

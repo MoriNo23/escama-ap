@@ -1,8 +1,9 @@
-# escama.env — central configuration for escama-ap (hostapd + dnsmasq AP converter)
+# escama.toml — central configuration for escama-ap (hostapd + dnsmasq AP converter)
 #
-# This file is read by all escama scripts and generated/edited by config-tui.sh.
-# Values below are the DEFAULTS; override them via the TUI or by editing this file.
-# After editing, restart the service: sudo systemctl restart escama-ap.service
+# This file is read by escama.py (formato TOML, tomllib stdlib) and edited by
+# escama-tui. Values below are the DEFAULTS; override them via the TUI or by
+# editing this file.
+# After editing, restart the service: sudo escama restart
 
 # --- Access Point interface (the designated AP / "escama") ---
 # Default: wn8200nd (TL-WN8200ND adapter).
@@ -27,7 +28,9 @@ CHANNEL="6"
 #   manual: usa CHANNEL tal cual, sin deteccion (comportamiento clasico).
 CHANNEL_MODE="auto"
 HW_MODE="g"
-WPA_PASSPHRASE="#[REMOVED]"
+# SIN passphrase por defecto: el repo es publico. El AP no arranca sin ella
+# (do_start lo exige). Definila aqui antes de levantar.
+WPA_PASSPHRASE=""
 
 # --- DNS for DHCP clients ---
 DNS1="8.8.8.8"

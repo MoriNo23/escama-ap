@@ -2,8 +2,9 @@
 """
 escama-tui.py - TUI (whiptail) para configurar escama-ap.
 
-Edita /etc/escama/escama.env y regenera los confs via escama.py genconfig.
-No duplica logica: delega en escama.py.
+Edita /etc/escama/escama.toml (TOML, tomllib es stdlib) y regenera los confs
+via escama.py genconfig. No duplica logica: delega en escama.py (DEFAULTS,
+load_env, save_config, list_tunnels).
 
 Uso: sudo escama-tui.py
 """
@@ -11,76 +12,18 @@ import os
 import sys
 import subprocess
 import time
+import ipaddress
 
-ENV_FILE = "/etc/escama/escama.env"
-WHIPTAIL = shutil_whiptail = "/usr/bin/whiptail"
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import escama
 
-DEFAULTS = {
-    "AP_IFACE": "wn8200nd",
-    "WAN_IFACE": "stonepi",
-    "SSID": "escama",
-    "CHANNEL": "6",
-    "HW_MODE": "g",
-    "AP_IP": "10.42.1.1",
-    "AP_CIDR": "24",
-    "AP_SUBNET": "10.42.1.0/24",
-    "DHCP_START": "10.42.1.10",
-    "DHCP_END": "10.42.1.254",
-    "DHCP_LEASE": "12h",
-    "WPA_PASSPHRASE": "#[REMOVED]",
-    "DNS1": "8.8.8.8",
-    "DNS2": "8.8.4.4",
-    "EGRESS_MODE": "auto",
-    "VPN_IFACE": "",
-    "VPN_FORCE_ROUTE": "yes",
-    "VPN_MSS_CLAMP": "yes",
-    "VPN_DNS1": "",
-    "VPN_DNS2": "",
-}
+CONFIG_FILE = escama.CONFIG_FILE
 
 import shutil
 
 if not shutil.which("whiptail"):
     print("ERROR: whiptail no instalado. sudo apt install whiptail", file=sys.stderr)
     sys.exit(1)
-
-
-def load_env():
-    cfg = dict(DEFAULTS)
-    if os.path.isfile(ENV_FILE):
-        with open(ENV_FILE) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                cfg[k.strip()] = v.strip().strip('"').strip("'")
-    return cfg
-
-
-def save_env(cfg):
-    os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
-    with open(ENV_FILE, "w") as f:
-        f.write("# escama.env - config central de escama-ap\n")
-        f.write("# Editar aqui. Los confs se regeneran con: sudo escama.py genconfig\n\n")
-        for k in DEFAULTS:
-            f.write(f'{k}="{cfg[k]}"\n')
-        f.write('\n# WAN override opcional (dejar vacio = auto-detecta ruta default)\n')
-        f.write(f'WAN_IFACE="{cfg["WAN_IFACE"]}"\n')
-
-
-def list_tunnels():
-    """Tunnel-ish ifaces present right now (wireguard/tun/known VPN names)."""
-    known = ("proton0", "pvpn0", "protonwire0", "CloudflareWARP", "warp0",
-             "nordlynx", "mullvad-wg", "wg0", "tun0", "tailscale0")
-    out = []
-    for d in sorted(os.listdir("/sys/class/net")):
-        if d in ("lo", "ipv6leakintrf0", "pvpnksintrf0"):
-            continue
-        if d in known or d.startswith(("wg", "tun", "ppp")) or \
-                os.path.exists(f"/sys/class/net/{d}/tun_flags"):
-            out.append(d)
-    return out
 
 
 def list_ifaces():
@@ -139,6 +82,22 @@ def read_version() -> str:
     return "desconocido"
 
 
+def _recalcular_dhcp(cfg: dict) -> None:
+    """Al cambiar IP/subred, el rango DHCP debe seguir dentro de la red nueva:
+    un rango de otra subred hace que dnsmasq ofrezca config inusable."""
+    try:
+        red = ipaddress.ip_network(cfg["AP_SUBNET"], strict=False)
+        ini = ipaddress.ip_address(cfg["DHCP_START"])
+        fin = ipaddress.ip_address(cfg["DHCP_END"])
+    except ValueError:
+        return
+    if ini in red and fin in red:
+        return
+    base = int(red.network_address) + 10
+    cfg["DHCP_START"] = str(ipaddress.ip_address(base))
+    cfg["DHCP_END"] = str(ipaddress.ip_address(int(red.broadcast_address) - 1))
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h", "help"):
         print("escama-tui - TUI de configuracion para escama-ap")
@@ -150,14 +109,14 @@ def main():
         print(f"escama-tui {read_version()}")
         sys.exit(0)
     # Gate por accion (spec `uso-sin-privilegios`): --help/--version ya salie-
-    # ron; el menu lee el env pero escribirlo requiere privilegio, asi que el
-    # gate queda para las acciones que mutan /etc/escama.
+    # ron; el menu lee la config pero escribir TOML en /etc/escama requiere
+    # privilegio, asi que el gate queda para el resto.
     if os.geteuid() != 0:
         print("Editar la configuracion necesita privilegio.\n"
               "  Ejecutalo con sudo:  sudo escama-tui\n"
               "  (--help y --version funcionan sin sudo)", file=sys.stderr)
         sys.exit(1)
-    cfg = load_env()
+    cfg = escama.load_env()
     while True:
         choice = whiptail_menu(
             "escama-ap Config",
@@ -179,8 +138,8 @@ def main():
             break
         if choice == "E":
             editor = os.environ.get("EDITOR", "nvim")
-            subprocess.run([editor, ENV_FILE], check=False)
-            cfg = load_env()  # reload after external edit
+            subprocess.run([editor, CONFIG_FILE], check=False)
+            cfg = escama.load_env()  # reload after external edit
             continue
         if choice == "1":
             ifaces = list_ifaces()
@@ -209,6 +168,7 @@ def main():
             if v and "/" in v:
                 cfg["AP_IP"], cfg["AP_CIDR"] = v.split("/", 1)
                 cfg["AP_SUBNET"] = f"{cfg['AP_IP'].rsplit('.',1)[0]}.0/{cfg['AP_CIDR']}"
+                _recalcular_dhcp(cfg)
         elif choice == "6":
             v = whiptail_input("DHCP", "rango inicio-fin (ej 10.42.1.10-10.42.1.254):",
                                f"{cfg['DHCP_START']}-{cfg['DHCP_END']}")
@@ -232,7 +192,7 @@ def main():
                  "wan", "Siempre WAN (ignora la VPN)"], 15, 74, 3)
             if sel:
                 cfg["EGRESS_MODE"] = sel
-            tuns = list_tunnels()
+            tuns = escama.list_tunnels()
             items = ["", "auto-detectar"] + [i for pair in [(t, t) for t in tuns]
                                              for i in pair]
             pick = whiptail_menu("Interfaz VPN",
@@ -252,7 +212,7 @@ def main():
                 else:
                     cfg["VPN_DNS1"] = cfg["VPN_DNS2"] = v.strip()
 
-    save_env(cfg)
+    escama.save_config(cfg)
     # regenerar confs
     subprocess.run(["escama", "genconfig"], check=False)
     # feedback de aplicación
@@ -262,7 +222,7 @@ def main():
     # traer estado real para feedback
     status = subprocess.run(["escama", "status"], capture_output=True, text=True)
     subprocess.run(["whiptail", "--msgbox",
-                    f"Configuracion guardada en {ENV_FILE}\n\n"
+                    f"Configuracion guardada en {CONFIG_FILE}\n\n"
                     f"AP={cfg['AP_IFACE']} WAN={cfg['WAN_IFACE']} SSID={cfg['SSID']}\n\n"
                     f"Para aplicar: sudo escama restart\n\n"
                     f"--- status ---\n{(status.stdout or '').strip()}", 20, 70],

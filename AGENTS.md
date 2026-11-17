@@ -3,7 +3,7 @@
 Convertidor de interfaz WiFi a Access Point (hostapd + dnsmasq + NAT masquerade) para
 Debian/Linux. El AP emite el SSID `escama`; el tráfico de clientes sale por la WAN
 (`-o WAN_IFACE`), o por un tunnel VPN si `EGRESS_MODE=auto` y hay uno arriba. Única
-fuente de lógica: `opt/escama/escama.py`. La config vive en `etc/escama/escama.env`
+fuente de lógica: `opt/escama/escama.py`. La config vive en `etc/escama/escama.toml`
 (editar ahí, NUNCA los confs generados).
 
 ## Dev environment
@@ -33,7 +33,7 @@ basename y rompe la colección (import mismatch). Usa siempre el path explícito
   `escama.py`: `start|stop|restart|status|reconnect|genconfig|egress|watch`.
   Ambos CLIs aceptan `--help|-h|help` y `--version|-v|version` (requisito no negociable).
 - `run()` auto-prefija `sudo` si `os.geteuid() != 0`. Path real de confs: `/etc/escama/*`.
-- Config: `DEFAULTS` (en escama.py) + `load_env()` mergea `escama.env` por encima.
+- Config: `DEFAULTS` (en escama.py) + `load_env()` mergea `escama.toml` por encima.
 - `log()` escribe a `/var/log/escama-ap.log` + syslog + print; envuelto en
   try/except para nunca crashear.
 
@@ -52,10 +52,10 @@ basename y rompe la colección (import mismatch). Usa siempre el path explícito
 - REGLA DE ORO: la WAN (`stonepi` por defecto) SOLO se lee, NUNCA se modifica
   (ni `ip addr del`, ni `nmcli`, ni `hostapd`) salvo que el env lo diga.
 - `hostapd-escama.conf` y `dnsmasq-escama.conf` se GENERAN con `genconfig` desde el env.
-  Nunca editar a mano; editar `escama.env` y correr `escama.py genconfig`.
+  Nunca editar a mano; editar `escama.toml` y correr `escama.py genconfig`.
 - No hardcodees la WAN en iptables: usa `WAN_IFACE` del env (`-o <WAN_IFACE>`),
   así el NAT sobrevive a cambiar la WAN o a un tunnel VPN arriba.
-- Repo con cambios sin commitear: `escama.env` tiene `AP_IFACE=stonepi` /
+- Repo con cambios sin commitear: `escama.toml` tiene `AP_IFACE=stonepi` /
   `WAN_IFACE=wn8200nd` (invertidos vs DEFAULTS). No asumas que `master` los refleja
   hasta que se haga commit.
 - `detect_ap_iface()`/`detect_wan_iface()` son nuevos (sin commitear en escama.py);

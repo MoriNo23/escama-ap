@@ -2,7 +2,7 @@
 """
 escama.py - Núcleo del AP casero "escama" (hostapd + dnsmasq).
 
-Única fuente de lógica. Lee /etc/escama/escama.env como fuente de verdad,
+Única fuente de lógica. Lee /etc/escama/escama.toml como fuente de verdad,
 genera hostapd-escama.conf y dnsmasq-escama.conf desde el env, levanta/baja
 el AP, valida de verdad (type AP, no grep ssid), y aplica masquerade dinámico
 usando WAN_IFACE del env (nunca hardcodeado).
@@ -16,9 +16,9 @@ import os
 import sys
 import syslog
 import subprocess
-import shutil
 import time
 import re
+import tomllib
 
 # --- Version ---
 # Fuente UNICA de la version (spec `versionado`): el archivo VERSION de la raiz
@@ -59,7 +59,9 @@ VERSION = _read_version()
 CONFIG_DIR = "/etc/escama"
 # Config del usuario: SIEMPRE en /etc y de SOLO LECTURA para el proceso. Es la
 # unica fuente de verdad (ver AGENTS.md) y nunca la regenera el nucleo.
-ENV_FILE = os.path.join(CONFIG_DIR, "escama.env")
+# Formato TOML (tomllib es stdlib): los comentarios SON parte del formato, la
+# TUI los conserva al guardar (save_config edita solo las claves conocidas).
+CONFIG_FILE = os.path.join(CONFIG_DIR, "escama.toml")
 
 
 # --- Rutas de runtime (spec `uso-sin-privilegios`, design D3) ---
@@ -103,7 +105,7 @@ def _config_dir() -> str:
     """Directorio de los confs GENERADOS: /etc con root, XDG_CONFIG_HOME sin root.
 
     Los confs de hostapd y dnsmasq son artefactos que genera `genconfig` a partir
-    de escama.env, no configuracion del usuario (esa es ENV_FILE, de solo
+    de escama.toml, no configuracion del usuario (esa es CONFIG_FILE, de solo
     lectura). Por eso van a /etc solo cuando hay privilegio: escribir en
     /etc/hostapd sin CAP_DAC_OVERRIDE aborta el arranque con PermissionError,
     y sin elAP rootless no tendria con que arrancar. hostapd y dnsmasq toman
@@ -202,7 +204,9 @@ DEFAULTS = {
     "DHCP_START": "10.42.1.10",
     "DHCP_END": "10.42.1.254",
     "DHCP_LEASE": "12h",
-    "WPA_PASSPHRASE": "#[REMOVED]",
+    # Sin passphrase por defecto: el repo es publico y una default aqui es la
+    # contrasena del AP de cualquiera que lo clone. do_start la exige vacia.
+    "WPA_PASSPHRASE": "",
     "DNS1": "8.8.8.8",
     "DNS2": "8.8.4.4",
     # --- VPN egress ---
@@ -252,37 +256,101 @@ def _tiene_caps_del_launcher() -> bool:
     return os.environ.get("ESCAMA_VIA_LAUNCHER") == "1"
 
 
-def run(cmd, check=True, capture=True):
+def run(cmd, capture=True, ro=False):
     """Run a command via root (sudo if not already root).
 
     Con el launcher rootless el proceso NO es root pero ya tiene las
     capabilities: anteponer sudo ahi seria contraproducente (el kernel no
     concede file caps bajo sudo, y pediria una password por cada comando, que
     es justo lo que el modo rootless elimina).
+
+    ro=True: comando de SOLO LECTURA (iw dev info, ip route show, ping,
+    systemctl is-active). Nunca antepone sudo: `escama status` sin launcher
+    no debe pedir password (y sin TTY, sudo falla en silencio y el status
+    miente). Los binarios de lectura no necesitan privilegio.
     """
-    if os.geteuid() != 0 and not _tiene_caps_del_launcher():
+    if os.geteuid() != 0 and not _tiene_caps_del_launcher() and not ro:
         cmd = ["sudo"] + cmd
     try:
         if capture:
             return subprocess.run(cmd, capture_output=True, text=True)
         return subprocess.run(cmd)
-    except FileNotFoundError as e:
-        if check:
-            raise
+    except (FileNotFoundError, PermissionError):
+        # binario ausente o sin permiso de ejecucion: los callers ya saben
+        # lidiar con None (chequean p / p.returncode). Elevar aqui mataria
+        # status y start con traceback en maquinas minimas, justo lo
+        # contrario del modo degradado que prometen los specs.
         return None
 
 
 def load_env() -> dict:
+    """Config del usuario: TOML en /etc/escama/escama.toml (fuente unica).
+
+    La migracion desde el dotenv viejo es un rename: el formato `KEY="value"`
+    con comentarios `#` ya era TOML valido. Fail-closed: un TOML con error de
+    sintaxis aborta con motivo (el parser viejo saltaba lineas rotas en
+    silencio, y media config aplicada es peor que ninguna).
+    """
     cfg = dict(DEFAULTS)
-    if os.path.isfile(ENV_FILE):
-        with open(ENV_FILE) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                cfg[k.strip()] = v.strip().strip('"').strip("'")
+    try:
+        with open(CONFIG_FILE, "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        return cfg
+    except tomllib.TOMLDecodeError as e:
+        log(f"ERROR: {CONFIG_FILE} no es TOML valido: {e}")
+        sys.exit(1)
+    for k, v in data.items():
+        # tomllib tipa: CHANNEL = 6 es int, VPN_MSS_CLAMP = true es bool.
+        # Todo el core trabaja con strings (formato historico del env).
+        if isinstance(v, (int, float, bool)):
+            v = str(v)
+        if isinstance(v, str):
+            cfg[k] = v
     return cfg
+
+
+def save_config(cfg: dict) -> None:
+    """Reescribe SOLO las claves conocidas de CONFIG_FILE.
+
+    Comentarios y claves ajenas se conservan: el TOML del usuario es suyo,
+    no un artefacto regenerable (la version vieja reescribia el archivo
+    entero y borraba ~40 lineas de documentacion). Claves duplicadas de más
+    se comentan: TOML no admite duplicados.
+    """
+    import json
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            lines = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        lines = [
+            "# escama.toml - config de escama-ap (formato TOML)\n",
+            "# Los confs se regeneran con: sudo escama genconfig\n\n",
+        ]
+    escritas = set()
+    out = []
+    for line in lines:
+        m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if m and m.group(1) in cfg:
+            k = m.group(1)
+            if k in escritas:
+                out.append("# duplicada (escama usa la primera): " + line)
+                continue
+            # json.dumps produce un basic string TOML valido (mismos escapes).
+            out.append(f'{k} = {json.dumps(str(cfg[k]))}\n')
+            escritas.add(k)
+        else:
+            out.append(line)
+    faltantes = [k for k in cfg if k not in escritas]
+    if faltantes:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        out.append("\n# agregadas por escama-tui (no estaban en el archivo)\n")
+        for k in faltantes:
+            out.append(f'{k} = {json.dumps(str(cfg[k]))}\n')
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        f.writelines(out)
 
 
 def iface_exists(iface: str) -> bool:
@@ -293,7 +361,7 @@ def iface_type_ap(iface: str) -> bool:
     """True if `iface` is currently operating as a Wi-Fi Access Point."""
     if not iface or not iface_exists(iface):
         return False
-    p = run(["iw", "dev", iface, "info"], capture=True)
+    p = run(["iw", "dev", iface, "info"], capture=True, ro=True)
     return bool(p) and "type AP" in (p.stdout or "")
 
 
@@ -304,7 +372,8 @@ def iface_is_routable_wan(iface: str) -> bool:
     """
     if not iface or not iface_exists(iface) or iface_is_tunnel(iface):
         return False
-    r = run(["ip", "route", "show", "default", "dev", iface], capture=True)
+    r = run(["ip", "route", "show", "default", "dev", iface], capture=True,
+            ro=True)
     return bool(r) and "default" in (r.stdout or "")
 
 
@@ -317,7 +386,7 @@ def detect_ap_iface(cfg: dict) -> str:
     ap_ip = (cfg.get("AP_IP") or "").strip()
     if ap_ip:
         r = run(["ip", "-o", "-4", "addr", "show", "to", ap_ip],
-                 capture=True)
+                capture=True, ro=True)
         for line in (r.stdout or "").splitlines():
             m = re.match(r"\S+\s+(\S+)\s+", line)
             if m:
@@ -340,7 +409,7 @@ def detect_wan_iface(cfg: dict) -> str:
         return forced
     ap = detect_ap_iface(cfg)
     # all default routes, lowest metric first
-    r = run(["ip", "route", "show", "default"], capture=True)
+    r = run(["ip", "route", "show", "default"], capture=True, ro=True)
     candidates = []
     for line in (r.stdout or "").splitlines():
         m = re.search(r"dev (\S+)", line)
@@ -413,7 +482,7 @@ def _prompt_iface(role: str, suggestion: str, exclude: str = "") -> str:
 
 def wan_has_internet(wan: str) -> bool:
     """Ping the WAN gateway. WAN iface is only READ, never modified."""
-    r = run(["ip", "route", "show", "dev", wan], capture=True)
+    r = run(["ip", "route", "show", "dev", wan], capture=True, ro=True)
     gw = None
     for l in (r.stdout or "").splitlines():
         if "default" in l:
@@ -423,8 +492,8 @@ def wan_has_internet(wan: str) -> bool:
                 break
     if not gw:
         return False
-    p = run(["ping", "-c", "1", "-W", "3", gw], capture=True)
-    return p.returncode == 0
+    p = run(["ping", "-c", "1", "-W", "3", gw], capture=True, ro=True)
+    return p is not None and p.returncode == 0
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +510,7 @@ def detectar_canal_wan(wan: str) -> str:
     aporta canal legible (ethernet, 5 GHz, sin asociacion, iw ausente)."""
     if not wan or not iface_exists(wan):
         return ""
-    p = run(["iw", "dev", wan, "link"], capture=True)
+    p = run(["iw", "dev", wan, "link"], capture=True, ro=True)
     if not p or p.returncode != 0:
         return ""
     m = re.search(r"freq:?\s*(\d+)", p.stdout or "")
@@ -514,7 +583,7 @@ def iface_is_tunnel(iface: str) -> bool:
     if os.path.exists(f"/sys/class/net/{iface}/tun_flags"):
         return True
     # wireguard devices report their kind via `ip -d link`
-    p = run(["ip", "-d", "link", "show", iface], capture=True)
+    p = run(["ip", "-d", "link", "show", iface], capture=True, ro=True)
     out = (p.stdout or "") if p else ""
     return "wireguard" in out or "ppp" in out or " tun " in out
 
@@ -554,7 +623,7 @@ def iface_mtu(iface: str) -> int:
 
 def iface_gateway(iface: str) -> str:
     """Default gateway advertised on `iface` (via <gw>), or "" if none/P2P."""
-    r = run(["ip", "route", "show", "dev", iface], capture=True)
+    r = run(["ip", "route", "show", "dev", iface], capture=True, ro=True)
     for line in (r.stdout or "").splitlines():
         if line.startswith("default"):
             m = re.search(r"via (\S+)", line)
@@ -565,7 +634,8 @@ def iface_gateway(iface: str) -> str:
 
 def iface_addr(iface: str) -> str:
     """Primary IPv4 address of `iface`, or "" if none assigned."""
-    r = run(["ip", "-o", "-4", "addr", "show", "dev", iface], capture=True)
+    r = run(["ip", "-o", "-4", "addr", "show", "dev", iface], capture=True,
+            ro=True)
     for line in (r.stdout or "").splitlines():
         m = re.search(r"inet (\S+)", line)
         if m:
@@ -639,24 +709,24 @@ def clear_egress(cfg: dict, egress: str = "", kind: str = "") -> None:
         # delete repeatedly: older runs may have stacked duplicates
         for _ in range(3):
             r = run(["iptables", "-t", "nat", "-D", "POSTROUTING",
-                     "-o", out, "-s", subnet, "-j", "MASQUERADE"], check=False)
+                     "-o", out, "-s", subnet, "-j", "MASQUERADE"])
             if not r or r.returncode != 0:
                 break
         run(["iptables", "-D", "FORWARD", "-i", ap, "-o", out,
-             "-s", subnet, "-j", "ACCEPT"], check=False)
+             "-s", subnet, "-j", "ACCEPT"])
         run(["iptables", "-D", "FORWARD", "-i", out, "-o", ap,
              "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
-             "-j", "ACCEPT"], check=False)
+             "-j", "ACCEPT"])
         run(["iptables", "-t", "mangle", "-D", "FORWARD", "-o", out,
              "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-             "-j", "TCPMSS", "--clamp-mss-to-pmtu"], check=False)
+             "-j", "TCPMSS", "--clamp-mss-to-pmtu"])
 
     # kill-switch rule (fail-closed): drop AP traffic leaving via WAN
     wan = cfg.get("WAN_IFACE") or ""
     if wan:
         for _ in range(3):
             r = run(["iptables", "-D", "FORWARD", "-i", ap, "-o", wan,
-                     "-s", subnet, "-j", "REJECT"], check=False)
+                     "-s", subnet, "-j", "REJECT"])
             if not r or r.returncode != 0:
                 break
 
@@ -666,11 +736,10 @@ def clear_egress(cfg: dict, egress: str = "", kind: str = "") -> None:
         # see docs/diagnostics/DIAGNOSIS-FINAL.md §4.1 — previously `from <subnet>`, which also
         # caught host-origin traffic from the AP IP and hijacked it into the
         # tunnel.
-        r = run(["ip", "rule", "del", "iif", ap, "lookup", ESCAMA_TABLE],
-                check=False)
+        r = run(["ip", "rule", "del", "iif", ap, "lookup", ESCAMA_TABLE])
         if not r or r.returncode != 0:
             break
-    run(["ip", "route", "flush", "table", ESCAMA_TABLE], check=False)
+    run(["ip", "route", "flush", "table", ESCAMA_TABLE])
     _clear_state()
 
 
@@ -680,36 +749,41 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
     ap = cfg["AP_IFACE"]
     wan = cfg.get("WAN_IFACE") or ""
 
+    # Guardar el forwarding previo (puede ser 1 por LXC/libvirt): do_stop lo
+    # restaura en vez de apagarlo en global y romper el NAT del host.
+    prev = run(["sysctl", "-n", "net.ipv4.ip_forward"], capture=True, ro=True)
+    ipfwd_prev = (prev.stdout or "").strip() if prev else ""
     clear_egress(cfg)
-    run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False)
+    run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
 
     if not egress:
         # fail-closed: sin salida valida, no dejamos fugar por WAN
         if wan:
             run(["iptables", "-A", "FORWARD", "-i", ap, "-o", wan,
-                 "-s", subnet, "-j", "REJECT"], check=False)
-        _write_state(EGRESS="", KIND="none")
+                 "-s", subnet, "-j", "REJECT"])
+        _write_state(EGRESS="", KIND="none", IPFWD=ipfwd_prev)
         log("WARN: sin egress valido; clientes SIN internet (fail-closed)")
         return
 
     # NAT + forward
     run(["iptables", "-t", "nat", "-A", "POSTROUTING",
-         "-o", egress, "-s", subnet, "-j", "MASQUERADE"], check=False)
+         "-o", egress, "-s", subnet, "-j", "MASQUERADE"])
     run(["iptables", "-A", "FORWARD", "-i", ap, "-o", egress,
-         "-s", subnet, "-j", "ACCEPT"], check=False)
+         "-s", subnet, "-j", "ACCEPT"])
     run(["iptables", "-A", "FORWARD", "-i", egress, "-o", ap,
          "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
-         "-j", "ACCEPT"], check=False)
+         "-j", "ACCEPT"])
 
     if kind == "vpn":
-        # rp_filter loose: el retorno entra por el tunnel, no por WAN
-        run(["sysctl", "-w", "net.ipv4.conf.all.rp_filter=2"], check=False)
-        run(["sysctl", "-w", f"net.ipv4.conf.{ap}.rp_filter=2"], check=False)
+        # rp_filter loose SOLO en la iface del AP: el kernel usa
+        # max(conf.all, conf.iface), asi que basta la iface y no se relaja
+        # rp_filter del host entero (LXC/libvirt no se enteran).
+        run(["sysctl", "-w", f"net.ipv4.conf.{ap}.rp_filter=2"])
 
         if _yes(cfg.get("VPN_MSS_CLAMP", "yes")):
             run(["iptables", "-t", "mangle", "-A", "FORWARD", "-o", egress,
                  "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-                 "-j", "TCPMSS", "--clamp-mss-to-pmtu"], check=False)
+                 "-j", "TCPMSS", "--clamp-mss-to-pmtu"])
 
         if _yes(cfg.get("VPN_FORCE_ROUTE", "yes")):
             # tabla dedicada: TODO lo que venga del subnet del AP sale por el
@@ -727,7 +801,7 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
             # saliente (MASQUERADE la reescribe despues por la IP del tun0).
             gw = iface_gateway(egress)
             src = iface_addr(egress)
-            run(["ip", "route", "flush", "table", ESCAMA_TABLE], check=False)
+            run(["ip", "route", "flush", "table", ESCAMA_TABLE])
             # orden ip route: add default [via <gw>] dev <iface> [src <ip>]
             # table <id>. Sin via, el kernel declara "Network unreachable"
             # para paquetes con source fuera del subnet del tunnel (caso
@@ -739,7 +813,7 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
             if src:
                 cmd += ["src", src]
             cmd += ["table", ESCAMA_TABLE]
-            run(cmd, check=False)
+            run(cmd)
             # Match on the AP INGRESS interface, NOT the source subnet.
             # A `from <subnet>` selector also catches host-originated packets
             # from the AP IP (10.42.1.1), hijacking host->client scans into the
@@ -747,14 +821,15 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
             # forwarded client ingress, so host-origin traffic uses the main
             # table and reaches clients directly.
             run(["ip", "rule", "add", "iif", ap, "lookup", ESCAMA_TABLE,
-                 "pref", ESCAMA_RULE_PREF], check=False)
+                 "pref", ESCAMA_RULE_PREF])
 
         # kill-switch: nada del AP puede escaparse por la WAN en claro
         if wan and wan != egress:
             run(["iptables", "-A", "FORWARD", "-i", ap, "-o", wan,
-                 "-s", subnet, "-j", "REJECT"], check=False)
+                 "-s", subnet, "-j", "REJECT"])
 
-    _write_state(EGRESS=egress, KIND=kind, AP=ap, SUBNET=subnet, WAN=wan)
+    _write_state(EGRESS=egress, KIND=kind, AP=ap, SUBNET=subnet, WAN=wan,
+                 IPFWD=ipfwd_prev)
     log(f"Egress aplicado: {egress} (modo={kind}, mtu={iface_mtu(egress)})")
 
 
@@ -772,20 +847,20 @@ def effective_dns(cfg: dict, kind: str) -> tuple:
     return cfg["DNS1"], cfg["DNS2"]
 
 
-def module_has_ap_mode() -> bool:
-    """Check the loaded 8192eu module exposes AP mode (CONFIG_AP_MODE=y)."""
-    p = run(["iw", "phy", _ap_phy(), "info"], capture=True)
-    if p.returncode != 0:
-        return False
-    return "type AP" in (p.stdout or "") or "* AP" in (p.stdout or "")
-
-
 def _ap_phy() -> str:
     cfg = load_env()
     ap = cfg["AP_IFACE"]
     phy = f"/sys/class/net/{ap}/phy80211"
     if os.path.islink(phy):
         return os.path.basename(os.readlink(phy))
+    return ""
+
+
+def _driver_de(ap: str) -> str:
+    """Driver en uso por la iface: basename del symlink de sysfs."""
+    drv = f"/sys/class/net/{ap}/device/driver"
+    if os.path.islink(drv):
+        return os.path.basename(os.readlink(drv))
     return ""
 
 
@@ -802,23 +877,33 @@ def reload_module_if_needed(ap: str) -> None:
     phy = _ap_phy()
     if not phy:
         return
-    p = run(["iw", "phy", phy, "info"], capture=True)
+    p = run(["iw", "phy", phy, "info"], capture=True, ro=True)
     if p is None or p.returncode != 0 or "* AP" in (p.stdout or ""):
         return
-    log(f"AP mode NOT exposed by {ap}; reloading 8192eu DKMS module")
-    r = run(["rmmod", "8192eu"], check=False)
+    driver = _driver_de(ap)
+    if driver != "8192eu":
+        # El reload era un truco especifico del DKMS 8192eu (wn8200nd): con
+        # otro driver en memoria (p. ej. aic8800_fdrv) rmmod del modulo
+        # equivocado no arreglaria nada. Degradar con informacion, no fingir.
+        log(f"DEGRADADO: AP mode NOT expuesto por {ap} "
+            f"(driver={driver or 'desconocido'}). El reload automatico "
+            "solo aplica al driver 8192eu.")
+        return
+    log(f"AP mode NOT expuesto por {ap}; recargando el modulo {driver}")
+    r = run(["rmmod", driver])
     if r is None or r.returncode != 0:
-        motivo = _motivo_fallo(r, "rmmod 8192eu")
+        motivo = _motivo_fallo(r, f"rmmod {driver}")
         log(f"DEGRADADO: no pude recargar el modulo del driver ({motivo}).")
         log("  Requiere CAP_SYS_MODULE: no esta en el modo rootless. "
-            "Cargalo a mano con sudo: modprobe -r 8192eu && modprobe 8192eu")
+            "Cargalo a mano con sudo: modprobe -r " + driver
+            + " && modprobe " + driver)
         return
     time.sleep(1)
-    run(["depmod", "-a"], check=False)
-    r = run(["modprobe", "8192eu"], check=False)
+    run(["depmod", "-a"])
+    r = run(["modprobe", driver])
     if r is None or r.returncode != 0:
-        log(f"DEGRADADO: modprobe 8192eu fallo ({_motivo_fallo(r, 'modprobe')}). "
-            "El AP puede no levantar.")
+        log(f"DEGRADADO: modprobe {driver} fallo "
+            f"({_motivo_fallo(r, 'modprobe')}). El AP puede no levantar.")
         return
     time.sleep(2)
     log("Modulo del driver recargado")
@@ -890,15 +975,37 @@ def generate_configs(cfg: dict, kind: str = "") -> None:
     """
     generar_hostapd(cfg)
     generar_dnsmasq(cfg, kind)
-    log("Configs regenerated from escama.env")
+    log("Configs regenerated from escama.toml")
+
+
+def _dnsmasq_pid() -> int:
+    """PID del dnsmasq de escama desde el pidfile, 0 si no hay."""
+    try:
+        with open(PIDFILE) as f:
+            return int(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def _hup_dnsmasq() -> None:
+    """SIGHUP al dnsmasq de escama SOLO (releer config)."""
+    pid = _dnsmasq_pid()
+    if pid:
+        run(["kill", "-HUP", str(pid)])
 
 
 def _kill_procs() -> None:
-    run(["pkill", "-x", "hostapd"], check=False)
-    run(["pkill", "-x", "dnsmasq"], check=False)
+    # hostapd es exclusivo de escama. dnsmasq NO: en esta maquina LXC corre
+    # el suyo para lxcbr0, asi que `pkill -x dnsmasq` romperia la red de los
+    # containers. El nuestro se identifica por pidfile.
+    run(["pkill", "-x", "hostapd"])
+    pid = _dnsmasq_pid()
+    if pid:
+        run(["kill", str(pid)])
     time.sleep(1)
-    run(["pkill", "-9", "-x", "hostapd"], check=False)
-    run(["pkill", "-9", "-x", "dnsmasq"], check=False)
+    run(["pkill", "-9", "-x", "hostapd"])
+    if pid:
+        run(["kill", "-9", str(pid)])
     if os.path.exists(PIDFILE):
         # En modo rootless el pidfile vive en el dir de runtime del usuario;
         # sin este try el borrado lanzaria PermissionError y abortaria el stop.
@@ -911,15 +1018,21 @@ def _kill_procs() -> None:
 def _ensure_ip(ap: str, ip_addr: str, cidr: str) -> None:
     # remove any stale 10.42.1.1 on OTHER ifaces (the duplicate-IP bug), but
     # never touch WAN iface config beyond reading.
-    run(["ip", "addr", "flush", "dev", ap], check=False)
-    run(["ip", "link", "set", ap, "down"], check=False)
+    run(["ip", "addr", "flush", "dev", ap])
+    run(["ip", "link", "set", ap, "down"])
     time.sleep(1)
-    run(["ip", "link", "set", ap, "up"], check=False)
-    run(["ip", "addr", "add", f"{ip_addr}/{cidr}", "dev", ap], check=False)
+    run(["ip", "link", "set", ap, "up"])
+    run(["ip", "addr", "add", f"{ip_addr}/{cidr}", "dev", ap])
 
 
 def do_start() -> int:
     cfg = load_env()
+    # El repo ya no trae passphrase (es publico): sin ella no se levanta ni un
+    # AP abierto ni uno reusando una contrasena vieja del historial de git.
+    if not (cfg.get("WPA_PASSPHRASE") or "").strip():
+        log("ERROR: WPA_PASSPHRASE vacia. Definela en /etc/escama/escama.toml "
+            "y vuelve a arrancar.")
+        return 1
     # --- Auto-detección de roles AP/WAN ---
     # La regla es: el env explicito gana. Si el iface explicito NO existe
     # (o es un tunnel) caemos a detección. Si detectar solo es ambiguo y hay
@@ -962,7 +1075,7 @@ def do_start() -> int:
     # de polkit, no una capability: puede fallar incluso siendo root.
     # Degradacion explicita (spec `uso-sin-privilegios`): si falla, se informa
     # con el motivo y se dice si impide o no el arranque.
-    r = run(["nmcli", "device", "set", ap, "managed", "no"], check=False)
+    r = run(["nmcli", "device", "set", ap, "managed", "no"])
     if r is None or r.returncode != 0:
         log(f"DEGRADADO: no pude quitarle {ap} a NetworkManager "
             f"({_motivo_fallo(r, 'nmcli device set managed no')}).")
@@ -985,7 +1098,7 @@ def do_start() -> int:
     _ensure_ip(ap, cfg["AP_IP"], cfg["AP_CIDR"])
 
     # hostapd
-    r = run(["hostapd", "-B", HOSTAPD_CONF], check=False)
+    r = run(["hostapd", "-B", HOSTAPD_CONF])
     if r.returncode != 0:
         log(f"ERROR: hostapd fallo (rc={r.returncode})")
         return 1
@@ -993,7 +1106,7 @@ def do_start() -> int:
 
     # dnsmasq
     run(["dnsmasq", "--conf-file=" + DNSMASQ_CONF,
-         "--pid-file=" + PIDFILE], check=False)
+         "--pid-file=" + PIDFILE])
 
     # forward + masquerade hacia el egress elegido (VPN o WAN)
     if kind == "vpn":
@@ -1003,8 +1116,8 @@ def do_start() -> int:
     apply_egress(cfg, egress, kind)
 
     # validate for real
-    p = run(["iw", "dev", ap, "info"], capture=True)
-    if p.returncode == 0 and "type AP" in (p.stdout or ""):
+    p = run(["iw", "dev", ap, "info"], capture=True, ro=True)
+    if p is not None and p.returncode == 0 and "type AP" in (p.stdout or ""):
         log(f"OK: AP activo en {ap} ({cfg['AP_IP']}/{cfg['AP_CIDR']}, ssid={cfg['SSID']})")
         if kind == "vpn":
             log(f"OK: egress por VPN {egress} (kill-switch: sin fuga por {wan})")
@@ -1022,16 +1135,20 @@ def do_stop() -> int:
     cfg = load_env()
     ap = cfg["AP_IFACE"]
     wan = cfg["WAN_IFACE"]
+    # Leer el forwarding guardado ANTES de clear_egress (borra el state).
+    ipfwd = _read_state().get("IPFWD", "")
     log("Deteniendo AP...")
     _kill_procs()
-    run(["ip", "addr", "del", f"{cfg['AP_IP']}/{cfg['AP_CIDR']}", "dev", ap],
-        check=False)
-    run(["nmcli", "device", "set", ap, "managed", "yes"], check=False)
+    run(["ip", "addr", "del", f"{cfg['AP_IP']}/{cfg['AP_CIDR']}", "dev", ap])
+    run(["nmcli", "device", "set", ap, "managed", "yes"])
     clear_egress(cfg)
-    run(["sysctl", "-w", "net.ipv4.ip_forward=0"], check=False)
-    run(["ip", "link", "set", ap, "down"], check=False)
+    # Restaurar el valor previo, no apagar el forwarding global: este sysctl
+    # lo comparte el host (LXC/libvirt) y a 0 les rompe el NAT.
+    if ipfwd in ("0", "1"):
+        run(["sysctl", "-w", f"net.ipv4.ip_forward={ipfwd}"])
+    run(["ip", "link", "set", ap, "down"])
     time.sleep(1)
-    run(["ip", "link", "set", ap, "up"], check=False)
+    run(["ip", "link", "set", ap, "up"])
     log("AP detenido. iface restaurada a cliente (NM gestionado).")
     return 0
 
@@ -1043,8 +1160,8 @@ def do_status() -> int:
     print(f"=== escama AP Status ===")
     print(f"AP iface:    {ap}")
     print(f"WAN iface:   {wan}")
-    p = run(["iw", "dev", ap, "info"], capture=True)
-    if p.returncode == 0 and "type AP" in (p.stdout or ""):
+    p = run(["iw", "dev", ap, "info"], capture=True, ro=True)
+    if p is not None and p.returncode == 0 and "type AP" in (p.stdout or ""):
         print("Modo:        AP (activo)")
         print(f"IP:          {cfg['AP_IP']}/{cfg['AP_CIDR']}")
         print(f"SSID:        {cfg['SSID']}")
@@ -1066,7 +1183,8 @@ def do_status() -> int:
         print(f"AVISO:       reglas aplicadas apuntan a '{applied or '(ninguna)'}'"
               f" != salida actual '{egress or '(ninguna)'}'."
               " Corre: sudo escama egress")
-    svc = run(["systemctl", "is-active", "escama-ap.service"], capture=True)
+    svc = run(["systemctl", "is-active", "escama-ap.service"], capture=True,
+              ro=True)
     print(f"Service:     {(svc.stdout or '').strip()}")
     # Ruta de runtime efectiva: sin esto no se distingue "no arranco" de
     # "no tengo permiso" al leer un log o un state (spec `uso-sin-privilegios`).
@@ -1101,7 +1219,7 @@ def do_egress(args: list = None) -> int:
     # DNS/MTU de los clientes cambian con el tunnel -> regenerar SOLO dnsmasq.
     # hostapd no se toca: el canal del AP debe quedar estable en vivo.
     generar_dnsmasq(cfg, kind)
-    run(["pkill", "-HUP", "-x", "dnsmasq"], check=False)
+    _hup_dnsmasq()
     return 0 if egress else 1
 
 
@@ -1121,7 +1239,7 @@ def do_watch(interval: int = 5) -> int:
             apply_egress(cfg, egress, kind)
             # solo dnsmasq: NUNCA regenerar hostapd aqui (canal estable)
             generar_dnsmasq(cfg, kind)
-            run(["pkill", "-HUP", "-x", "dnsmasq"], check=False)
+            _hup_dnsmasq()
             last = (egress, kind)
         time.sleep(interval)
 
@@ -1177,7 +1295,7 @@ def preflight() -> dict:
         comps[f"comando {b}"] = os.path.lexists(os.path.join(INSTALL_BIN_DIR, b))
     comps[f"core {INSTALL_PREFIX}/escama.py"] = os.path.isfile(
         os.path.join(INSTALL_PREFIX, "escama.py"))
-    comps["config /etc/escama/escama.env"] = os.path.isfile(ENV_FILE)
+    comps["config /etc/escama/escama.toml"] = os.path.isfile(CONFIG_FILE)
     for u in INSTALL_UNITS:
         comps[f"unit {u}"] = os.path.isfile(os.path.join(INSTALL_UNIT_DIR, u))
 
@@ -1337,7 +1455,7 @@ def _bootstrap_instalacion() -> bool:
         return False
     # Un unico prompt de privilegio: install.sh hace el resto con su propio sudo
     # (sudo cachea la credencial, asi que no vuelve a pedirla).
-    p = run(["bash", script, "install"], check=False, capture=True)
+    p = run(["bash", script, "install"], capture=True)
     if p is None or p.returncode != 0:
         print("ERROR: la instalacion fallo. Instalalo manualmente con:\n"
               f"  sudo {script} install", file=sys.stderr)
@@ -1400,11 +1518,11 @@ def main(args: list = None) -> int:
         print("  restart    stop + start")
         print("  status     Estado actual")
         print("  reconnect  Reconexion manual tras plug/unplug")
-        print("  genconfig Regenera hostapd/dnsmasq desde escama.env")
+        print("  genconfig Regenera hostapd/dnsmasq desde escama.toml")
         print("  egress     Re-evalua la salida (VPN/WAN) sin tirar el AP")
         print("             uso: escama egress [auto|vpn|wan|<iface>]")
         print("  watch      Loop que sigue el estado del tunnel y reaplica NAT")
-        print("  edit       Abre escama.env en $EDITOR (nvim por defecto)")
+        print("  edit       Abre escama.toml en $EDITOR (nvim por defecto)")
         print("  preflight  Estado de la instalacion (solo lectura, sin sudo)")
         print("\nOpciones: --help|-h  --version|-v")
         print("\nSin sudo: status, preflight, --help y --version.")
@@ -1452,7 +1570,7 @@ def main(args: list = None) -> int:
         return do_preflight()
     elif action == "edit":
         editor = os.environ.get("EDITOR", "nvim")
-        os.execvp(editor, [editor, ENV_FILE])
+        os.execvp(editor, [editor, CONFIG_FILE])
         return 0  # unreachable
     else:
         print(f"Accion desconocida: {action}", file=sys.stderr)

@@ -19,9 +19,12 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 OPT_DIR="/opt/escama"
 BIN_DIR="/usr/local/bin"
 UNIT_DIR="/etc/systemd/system"
-ENV_DST="/etc/escama/escama.env"
+ENV_DST="/etc/escama/escama.toml"
+# dotenv pre-TOML: si existe y parsea como TOML, cmd_install lo renombra
+# (el formato KEY="value" con comentarios # ya era TOML valido).
+LEGACY_ENV="/etc/escama/escama.env"
 SRC_CODE="$REPO/opt/escama"
-SRC_ENV="$REPO/etc/escama/escama.env"
+SRC_ENV="$REPO/etc/escama/escama.toml"
 SRC_UNITS="$REPO/etc/systemd/system"
 UNITS="escama-ap.service escama-egress.service"
 # Units de USUARIO para el modo rootless (spec `uso-sin-privilegios`).
@@ -174,7 +177,26 @@ cmd_install() {
     instalar_launcher
     ln -sfn "$OPT_DIR/escama.py"     "$BIN_DIR/escama"
     ln -sfn "$OPT_DIR/escama-tui.py" "$BIN_DIR/escama-tui"
-    # env: NUNCA se pisa el del usuario (novedades al lado, en .new)
+    # residuos de la instalacion vieja: los .sh que el core Python consolido
+    # siguen ejecutables en /opt si no se borran (el preflight diria "completa"
+    # al lado de codigo muerto).
+    rm -f "$OPT_DIR/detect-iface.sh" "$OPT_DIR/config-tui.sh" \
+          "$OPT_DIR/start-ap.sh" "$OPT_DIR/stop-ap.sh" \
+          "$OPT_DIR/toggle-ap.sh" "$OPT_DIR/cleanup-warp.sh"
+    rm -rf "$OPT_DIR/__pycache__"
+    # migracion dotenv->TOML: un rename alcanza porque el formato viejo ya era
+    # TOML valido. Fail-closed: si no parsea, queda intacto y se avisa (nunca
+    # se destruye la config del usuario).
+    if [ -f "$LEGACY_ENV" ] && [ ! -f "$ENV_DST" ]; then
+        if python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$LEGACY_ENV" 2>/dev/null; then
+            mv "$LEGACY_ENV" "$ENV_DST"
+            echo "Migrado: $LEGACY_ENV -> $ENV_DST (el formato ya era TOML valido)"
+        else
+            echo "AVISO: $LEGACY_ENV no es TOML valido; NO se migro." >&2
+            echo "       Corrige la sintaxis y vuelve a correr install.sh install." >&2
+        fi
+    fi
+    # config: NUNCA se pisa la del usuario (novedades al lado, en .new)
     if [ -f "$ENV_DST" ]; then
         cp "$SRC_ENV" "$ENV_DST.new"
         echo "AVISO: $ENV_DST existente: se conserva; novedades en $ENV_DST.new"

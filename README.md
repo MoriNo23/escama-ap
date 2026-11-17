@@ -15,23 +15,23 @@ Consolidado de 6 scripts bash sueltos → **1 librería Python + 1 TUI**. Menos 
 ```
 opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig|egress|watch|preflight
 opt/escama/escama-launch.c  # launcher ELF rootless (capabilities → núcleo); se compila a /opt/escama/escama-launch
-opt/escama/escama-tui.py    # TUI (whiptail): edita escama.env y regenera confs
-etc/escama/escama.env       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID, etc.)
+opt/escama/escama-tui.py    # TUI (whiptail): edita escama.toml y regenera confs
+etc/escama/escama.toml       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID, etc.)
 etc/hostapd/hostapd-escama.conf    # generado (con root) — sin root: ~/.config/escama/hostapd-escama.conf
 etc/dnsmasq-escama.conf           # generado (con root) — sin root: ~/.config/escama/dnsmasq-escama.conf
 etc/systemd/system/escama-ap.service      # ExecStart=/opt/escama/escama.py start
 etc/systemd/system/escama-egress.service  # watcher VPN: escama.py watch 5
 etc/systemd/user/escama-ap.service        # autostart sin sudo (rootless) al iniciar sesión
 etc/systemd/user/escama-egress.service    # watcher VPN en modo rootless
-tests/test_escama.py        # 105 unit tests (mock de system calls, no toca el sistema)
+tests/test_escama.py        # 115 unit tests (mock de system calls, no toca el sistema)
 setup.cfg                   # config de mutmut (mutation testing)
 install.sh                  # ciclo de vida: install|uninstall|enable|disable|status|enable --user
 ```
 
 Instalación y autostart: `sudo ./install.sh install|enable|disable|uninstall` y
 `./install.sh status` — crea los symlinks de `escama`/`escama-tui` en
-`/usr/local/bin/`, instala los units y **nunca pisa tu `escama.env`** (las
-novedades quedan al lado, en `escama.env.new`). También instala las user units
+`/usr/local/bin/`, instala los units y **nunca pisa tu `escama.toml`** (las
+novedades quedan al lado, en `escama.toml.new`). También instala las user units
 (rootless) sin habilitarlas: eso es `install.sh enable --user`.
 
 ## Diseño anti-errores (por qué no se rompe solo)
@@ -69,13 +69,13 @@ sudo escama.py start         # levanta el AP (hostapd + dnsmasq + masq + forward
 sudo escama.py stop          # baja el AP, restaura iface a cliente (NM managed)
 sudo escama.py restart       # stop + start
 sudo escama.py reconnect     # igual que restart pero para reconexión manual tras plug/unplug
-sudo escama.py genconfig     # regenera hostapd/dnsmasq confs desde escama.env
+sudo escama.py genconfig     # regenera hostapd/dnsmasq confs desde escama.toml
 sudo escama.py egress        # re-evalua salida VPN/WAN sin tirar el AP
 sudo escama.py egress vpn    # forzar salida por tunnel (auto|vpn|wan|<iface>)
 sudo escama.py watch         # loop: sigue el tunnel y reaplica NAT solo
 escama preflight             # comprueba la maquina (componentes, version, rootless viable)
 
-sudo escama-tui              # menú interactivo (whiptail) para editar escama.env
+sudo escama-tui              # menú interactivo (whiptail) para editar escama.toml
 ```
 
 ## Versionado
@@ -155,7 +155,7 @@ si el adaptador se desenchufa, hay que correr `sudo escama.py reconnect` a mano)
 
 ## Migrar AP ↔ WAN (ej. usar stonepi como AP)
 
-Editar `/etc/escama/escama.env`:
+Editar `/etc/escama/escama.toml`:
 
 ```ini
 AP_IFACE="stonepi"
@@ -170,7 +170,7 @@ wn8200nd sea cliente con internet.)
 ## Canal del AP (no chocar con la WAN)
 
 ```ini
-# /etc/escama/escama.env
+# /etc/escama/escama.toml
 CHANNEL_MODE="auto"    # auto = al start elige de {1,6,11} sin solape con la WAN
                        # manual = usa CHANNEL tal cual (comportamiento clásico)
 CHANNEL="6"            # fallback si la WAN no es WiFi legible (o en modo manual)
@@ -182,7 +182,7 @@ y su motivo quedan en el log (`/var/log/escama-ap.log`).
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 105 tests (SIEMPRE el path explícito)
+python3 -m pytest tests/test_escama.py -q   # 115 tests (SIEMPRE el path explícito)
 ~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
 ```
 NO corras `python3 -m pytest` sin el path: `mutants/tests/` tiene el mismo
@@ -234,7 +234,7 @@ Si usás una VPN en este equipo, los clientes del AP **no** se quedan sin intern
 escama detecta el tunnel y mueve el NAT ahí.
 
 ```ini
-# /etc/escama/escama.env
+# /etc/escama/escama.toml
 EGRESS_MODE="auto"    # auto = VPN si hay tunnel, si no WAN (fallback)
                       # vpn  = solo VPN (kill-switch, sin tunnel no navegan)
                       # wan  = siempre WAN (ignora la VPN)

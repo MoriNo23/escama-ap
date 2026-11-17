@@ -20,7 +20,7 @@ import opt.escama.escama as escama
 def patch_run(monkeypatch):
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         # default: simulate success
         class R:
@@ -67,7 +67,7 @@ def test_load_env_defaults():
 def test_load_env_from_file(tmp_path, monkeypatch):
     env = tmp_path / "escama.env"
     env.write_text('SSID="mired"\nCHANNEL="11"\nWAN_IFACE=""\n')
-    monkeypatch.setattr(escama, "ENV_FILE", str(env))
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(env))
     cfg = escama.load_env()
     assert cfg["SSID"] == "mired"
     assert cfg["CHANNEL"] == "11"
@@ -78,7 +78,7 @@ def test_load_env_from_file(tmp_path, monkeypatch):
 def test_generate_configs_from_env(tmp_path, monkeypatch):
     env = tmp_path / "escama.env"
     env.write_text('AP_IFACE="wlan9"\nSSID="testap"\nCHANNEL="3"\nWPA_PASSPHRASE="pass1234"\nAP_IP="10.0.0.1"\nAP_CIDR="24"\nAP_SUBNET="10.0.0.0/24"\nDHCP_START="10.0.0.10"\nDHCP_END="10.0.0.50"\nDHCP_LEASE="1h"\nDNS1="1.1.1.1"\nDNS2="9.9.9.9"\n')
-    monkeypatch.setattr(escama, "ENV_FILE", str(env))
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(env))
     monkeypatch.setattr(escama, "HOSTAPD_CONF", str(tmp_path / "hostapd.conf"))
     monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
     cfg = escama.load_env()
@@ -99,7 +99,7 @@ def test_generate_configs_from_env(tmp_path, monkeypatch):
 def test_wan_autodetect_from_default_route(monkeypatch):
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -127,7 +127,7 @@ def test_wan_autodetect_from_default_route(monkeypatch):
 
 
 def test_wan_autodetect_fallback_stonepi(monkeypatch):
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 0
             stdout = ""  # no default route
@@ -157,7 +157,7 @@ def test_ap_mode_missing_triggers_reload(monkeypatch):
     states = {"phy": "* IBSS\n* managed\n", "exists": True}
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -171,6 +171,7 @@ def test_ap_mode_missing_triggers_reload(monkeypatch):
     monkeypatch.setattr(escama, "run", fake_run)
     monkeypatch.setattr(escama, "iface_exists", lambda x: True)
     monkeypatch.setattr(escama, "_ap_phy", lambda: "phy2")
+    monkeypatch.setattr(escama, "_driver_de", lambda a: "8192eu")
     escama.reload_module_if_needed("wn8200nd")
     assert any(c[:1] == ["rmmod"] for c in calls), "should rmmod when AP mode missing"
     assert any(c[:1] == ["modprobe"] for c in calls), "should modprobe after rmmod"
@@ -178,7 +179,7 @@ def test_ap_mode_missing_triggers_reload(monkeypatch):
 
 def test_ap_mode_present_no_reload(monkeypatch):
     calls = []
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -195,7 +196,7 @@ def test_ap_mode_present_no_reload(monkeypatch):
 def test_do_start_validates_real_ap_mode(monkeypatch):
     """do_start must report OK only if iw dev shows 'type AP', not a bogus ssid."""
     calls = []
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -225,7 +226,7 @@ def test_do_start_validates_real_ap_mode(monkeypatch):
 
 def test_do_start_fails_when_ap_mode_not_reached(monkeypatch):
     calls = []
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -252,9 +253,11 @@ def test_do_start_fails_when_ap_mode_not_reached(monkeypatch):
 
 
 def test_do_stop_restores_client_mode(monkeypatch):
-    """do_stop must remove AP IP, set NM managed=yes, kill procs, disable forward."""
+    """do_stop must remove AP IP, set NM managed=yes, kill procs, and NOT force
+    the global ip_forward to 0 (LXC/libvirt share that sysctl): without IPFWD
+    in the state, do_stop must not touch it at all."""
     calls = []
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -266,19 +269,46 @@ def test_do_stop_restores_client_mode(monkeypatch):
     monkeypatch.setattr(escama, "load_env", lambda: {
         "AP_IFACE": "wn8200nd", "WAN_IFACE": "stonepi", "AP_IP": "10.42.1.1",
         "AP_CIDR": "24", "AP_SUBNET": "10.42.1.0/24"})
+    monkeypatch.setattr(escama, "_read_state", lambda: {})
     rc = escama.do_stop()
     assert rc == 0
     # NM managed yes on AP iface
     assert any(c[:3] == ["nmcli", "device", "set"] and "managed" in c and "yes" in c
                for c in calls), "do_stop must restore NM managed=yes"
-    # ip_forward disabled
-    assert any(c[:3] == ["sysctl", "-w", "net.ipv4.ip_forward=0"] for c in calls)
+    # ip_forward: solo se restaura si el state lo guarda (nunca a 0 por decreto)
+    assert not any("ip_forward" in " ".join(c) for c in calls), (
+        "sin IPFWD en el state, do_stop NO debe tocar el ip_forward global")
     # masquerade deleted for WAN iface
     assert any(c[:3] == ["iptables", "-t", "nat"] and "stonepi" in c for c in calls)
 
 
+def test_do_stop_restaura_ip_forward_del_state(monkeypatch):
+    """El ip_forward previo guardado por apply_egress (IPFWD) se restaura al
+    stop: escama comparte ese sysctl con el host (LXC/libvirt NAT)."""
+    calls = []
+    def fake_run(cmd, capture=True, **_kw):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "_kill_procs", lambda: None)
+    monkeypatch.setattr(escama, "load_env", lambda: {
+        "AP_IFACE": "wn8200nd", "WAN_IFACE": "stonepi", "AP_IP": "10.42.1.1",
+        "AP_CIDR": "24", "AP_SUBNET": "10.42.1.0/24"})
+    monkeypatch.setattr(escama, "_read_state", lambda: {"IPFWD": "1"})
+    escama.do_stop()
+    assert any(c == ["sysctl", "-w", "net.ipv4.ip_forward=1"] for c in calls)
+    calls.clear()
+    monkeypatch.setattr(escama, "_read_state", lambda: {"IPFWD": "0"})
+    escama.do_stop()
+    assert any(c == ["sysctl", "-w", "net.ipv4.ip_forward=0"] for c in calls)
+
+
 def test_wan_has_internet_true(monkeypatch):
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 0
             if cmd[:2] == ["ip", "route"]:
@@ -294,7 +324,7 @@ def test_wan_has_internet_true(monkeypatch):
 
 
 def test_wan_has_internet_false(monkeypatch):
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 1  # ping fails
             stdout = "default via 192.168.1.1 dev stonepi\n" if cmd[:2] == ["ip", "route"] else ""
@@ -305,7 +335,7 @@ def test_wan_has_internet_false(monkeypatch):
 
 
 def test_do_status_runs(monkeypatch, capsys):
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 0
             stdout = "type AP\nssid escama\n"
@@ -372,32 +402,44 @@ def test_log_handles_missing_dir(tmp_path, monkeypatch):
     assert "no crash" in logf.read_text()
 
 
-def test_load_env_parsing_edge_cases(tmp_path, monkeypatch):
-    """load_env must skip comments, blanks, handle spaces and unquoted values."""
-    env = tmp_path / "escama.env"
+def test_load_env_toml(tmp_path, monkeypatch):
+    """load_env parsea TOML real: comentarios, espacios, comillas y tipos."""
+    env = tmp_path / "escama.toml"
     env.write_text(
         "# comment line\n"
         "\n"
-        "AP_IFACE = wlan5\n"          # spaces around =
-        "WAN_IFACE=eth0\n"            # unquoted
-        "SSID='my ssid'\n"            # single quotes
-        "BADLINE\n"                   # no = sign, skipped
-        "CHANNEL=11\n"
+        'AP_IFACE = "wlan5"\n'          # espacios alrededor de =
+        "CHANNEL = 11\n"                # int -> str
+        "VPN_MSS_CLAMP = true\n"        # bool -> str
+        'SSID = "my ssid"\n'
+        'CLAVE_AJENA = "x"\n'           # clave desconocida: se conserva
     )
-    monkeypatch.setattr(escama, "ENV_FILE", str(env))
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(env))
     cfg = escama.load_env()
     assert cfg["AP_IFACE"] == "wlan5"
-    assert cfg["WAN_IFACE"] == "eth0"
+    assert cfg["CHANNEL"] == "11", "int de TOML se coacciona a str"
+    assert escama._yes(cfg["VPN_MSS_CLAMP"]), "bool de TOML sigue parseando como yes"
     assert cfg["SSID"] == "my ssid"
-    assert cfg["CHANNEL"] == "11"
+    assert cfg["CLAVE_AJENA"] == "x"
     # defaults preserved for keys not in file
     assert cfg["AP_IP"] == "10.42.1.1"
+
+
+def test_load_env_toml_invalido_aborta(tmp_path, monkeypatch):
+    """Fail-closed: un TOML con error de sintaxis aborta con motivo. El parser
+    viejo saltaba lineas rotas en silencio: media config aplicada es peor que
+    ninguna."""
+    env = tmp_path / "escama.toml"
+    env.write_text('AP_IFACE="a"\nSSID="sin cerrar\n')
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(env))
+    with pytest.raises(SystemExit):
+        escama.load_env()
 
 
 def test_load_env_overrides_defaults(tmp_path, monkeypatch):
     env = tmp_path / "escama.env"
     env.write_text('AP_IFACE="custom"\nWAN_IFACE="wlan9"\n')
-    monkeypatch.setattr(escama, "ENV_FILE", str(env))
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(env))
     cfg = escama.load_env()
     assert cfg["AP_IFACE"] == "custom"
     assert cfg["WAN_IFACE"] == "wlan9"
@@ -432,7 +474,7 @@ def test_iface_is_tunnel_known_names(monkeypatch):
 def test_iface_is_tunnel_detects_wireguard_kind(monkeypatch):
     monkeypatch.setattr(escama.os.path, "exists", lambda p: False)
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 0
             stdout = "12: pvpnwg: <POINTOPOINT> ... wireguard numtxqueues 1"
@@ -468,7 +510,7 @@ def test_detect_wan_iface_detecta_usb_wifi_wlx(monkeypatch):
     monkeypatch.setattr(escama, "iface_is_tunnel", lambda i: False)
     monkeypatch.setattr(escama, "detect_ap_iface", lambda c: "stonepi")
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 0
             stdout = "default via 192.168.101.1 dev wlx020304050607 metric 600\n"
@@ -509,7 +551,7 @@ def test_resolve_egress_wan_mode_ignores_vpn(monkeypatch):
 def test_apply_egress_vpn_masquerades_on_tunnel_and_blocks_wan(monkeypatch, tmp_path):
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 1  # make delete-loops terminate
@@ -552,7 +594,7 @@ def test_apply_egress_vpn_rule_scoped_to_ap_ingress_not_source_subnet(monkeypatc
     host->client scans/connections while VPN egress is active."""
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 1  # make delete-loops terminate
@@ -576,7 +618,7 @@ def test_apply_egress_vpn_rule_scoped_to_ap_ingress_not_source_subnet(monkeypatc
 def test_apply_egress_wan_has_no_killswitch_or_policy_route(monkeypatch, tmp_path):
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 1
@@ -599,7 +641,7 @@ def test_apply_egress_wan_has_no_killswitch_or_policy_route(monkeypatch, tmp_pat
 def test_apply_egress_none_is_fail_closed(monkeypatch, tmp_path):
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 1
@@ -624,7 +666,7 @@ def test_clear_egress_removes_rules_from_state(monkeypatch, tmp_path):
     monkeypatch.setattr(escama, "STATE_FILE", str(state))
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 1
@@ -685,7 +727,7 @@ def _cfg_canal(**over):
 
 def _fake_iw_link(stdout_iw):
     """fake_run que responde los `iw dev <wan> link` con la salida dada."""
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 0
             stdout = stdout_iw if cmd[:2] == ["iw", "dev"] else ""
@@ -713,7 +755,7 @@ def test_detectar_canal_wan_no_legible(monkeypatch):
     monkeypatch.setattr(escama, "run", _fake_iw_link("freq: 2400 MHz"))
     assert escama.detectar_canal_wan("stonepi") == ""
 
-    def rc_fail(cmd, check=True, capture=True):
+    def rc_fail(cmd, capture=True, **_kw):
         class R:
             returncode = 1
             stdout = ""
@@ -756,7 +798,7 @@ def test_elegir_canal_default_es_auto():
 
 def test_elegir_canal_manual_no_consulta_la_wan(monkeypatch):
     """CHANNEL_MODE=manual: usa CHANNEL del env y NUNCA consulta la WAN."""
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         if cmd[:3] == ["iw", "dev", "stonepi"] and "link" in cmd:
             raise AssertionError("manual no debe consultar el canal de la WAN")
         class R:
@@ -774,7 +816,7 @@ def test_do_start_resuelve_canal_y_logea(monkeypatch, capsys):
     """do_start elige el canal ANTES de generar confs y lo loguea."""
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -824,7 +866,7 @@ def test_do_watch_no_reescribe_hostapd(monkeypatch, tmp_path):
     monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "proton0")
     monkeypatch.setattr(escama, "apply_egress", lambda c, e, k: None)
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 0
             stdout = ""
@@ -965,7 +1007,8 @@ def test_main_solo_lectura_corren_sin_root(monkeypatch, capsys):
     assert escama.main(["status"]) == 0
     assert escama.main(["--version"]) == 0
     assert escama.main(["--help"]) == 0
-    assert "1." in capsys.readouterr().out or "desconocido" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "escama " in out, "--version debe imprimir la version (sea cual sea), sin pedir root"
 
 
 def test_main_mutante_exige_privilegio_con_mensaje(monkeypatch, capsys):
@@ -1013,7 +1056,7 @@ def _preflight_con(tmp_path, monkeypatch, installed=(), codigo_igual=True,
             p.write_text("x")
     monkeypatch.setattr(escama, "INSTALL_BIN_DIR", str(tmp_path / "bin"))
     monkeypatch.setattr(escama, "INSTALL_PREFIX", str(tmp_path / "opt" / "escama"))
-    monkeypatch.setattr(escama, "ENV_FILE", str(tmp_path / "etc/escama/escama.env"))
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(tmp_path / "etc/escama/escama.env"))
     monkeypatch.setattr(escama, "INSTALL_UNIT_DIR", str(tmp_path / "units"))
     if ver_inst:
         (tmp_path / "opt" / "escama" / "VERSION").parent.mkdir(
@@ -1100,7 +1143,7 @@ def test_bootstrap_acepta_con_un_solo_prompt(tmp_path, monkeypatch, capsys):
                     {"estado": "completa", "faltan": [], "componentes": {},
                      "version_repo": "1", "version_instalada": "1"}])
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -1125,7 +1168,7 @@ def test_bootstrap_fallido_no_continua(tmp_path, monkeypatch, capsys):
                                  "componentes": {}, "version_repo": "1",
                                  "version_instalada": "(ninguna)"})
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 1
             stdout = ""
@@ -1505,7 +1548,7 @@ def _fake_run(monkeypatch, fallan=(), ok=()):
     """fake_run donde los comandos de `fallan` devuelven rc!=0 con stderr."""
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         nombre = " ".join(cmd[:2]) if len(cmd) > 1 else cmd[0]
         if nombre in fallan or (nombre, " ".join(cmd)) in fallan:
@@ -1528,6 +1571,7 @@ def test_rmmod_fallido_se_reporta_con_motivo(monkeypatch, tmp_path, capsys):
     motivo real, no seguir en silencio."""
     monkeypatch.setattr(escama, "iface_exists", lambda x: True)
     monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    monkeypatch.setattr(escama, "_driver_de", lambda a: "8192eu")
     _fake_run(monkeypatch, fallan=("rmmod 8192eu",))
     monkeypatch.setattr(escama.time, "sleep", lambda s: None)
     escama.reload_module_if_needed("wn8200nd")
@@ -1540,6 +1584,7 @@ def test_rmmod_fallido_se_reporta_con_motivo(monkeypatch, tmp_path, capsys):
 def test_modprobe_fallido_se_reporta(monkeypatch, capsys):
     monkeypatch.setattr(escama, "iface_exists", lambda x: True)
     monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    monkeypatch.setattr(escama, "_driver_de", lambda a: "8192eu")
     _fake_run(monkeypatch, fallan=("modprobe 8192eu",))
     monkeypatch.setattr(escama.time, "sleep", lambda s: None)
     escama.reload_module_if_needed("wn8200nd")
@@ -1551,6 +1596,7 @@ def test_reload_exitoso_no_inventa_degradacion(monkeypatch, capsys):
     """Si todo va bien, no debe decir DEGRADADO."""
     monkeypatch.setattr(escama, "iface_exists", lambda x: True)
     monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    monkeypatch.setattr(escama, "_driver_de", lambda a: "8192eu")
     _fake_run(monkeypatch)
     monkeypatch.setattr(escama.time, "sleep", lambda s: None)
     escama.reload_module_if_needed("wn8200nd")
@@ -1565,7 +1611,7 @@ def test_reload_no_hace_nada_si_el_modo_ap_ya_esta(monkeypatch):
     monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
     calls = []
 
-    def fake_run(cmd, check=True, capture=True):
+    def fake_run(cmd, capture=True, **_kw):
         calls.append(cmd)
         class R:
             returncode = 0
@@ -1650,7 +1696,7 @@ def test_dnsmasq_conf_va_a_xdg_sin_root(monkeypatch, tmp_path):
 def test_env_file_siempre_en_etc(monkeypatch):
     """La config del usuario NUNCA se mueve: es la fuente de verdad y solo se
     lee. Moverla romperia el contrato documentado en AGENTS.md."""
-    assert escama.ENV_FILE == "/etc/escama/escama.env"
+    assert escama.CONFIG_FILE == "/etc/escama/escama.toml"
 
 
 def test_config_dir_cae_a_tmp_si_no_se_puede_crear(monkeypatch):
@@ -1724,3 +1770,130 @@ def test_tui_usa_realpath_para_no_perder_la_version():
         "escama-tui debe resolver la version con realpath para funcionar via symlink")
     assert "os.path.abspath(__file__)" not in src, (
         "abspath rompe la busqueda de VERSION cuando el comando se invoca por symlink")
+
+
+# ---------------------------------------------------------------------------
+# Endurecimiento 2.0.0 (audit) + config TOML
+# ---------------------------------------------------------------------------
+
+import tomllib
+
+
+def test_do_start_sin_passphrase_no_levanta_nada(monkeypatch):
+    """Sin passphrase el AP no arranca: ni abierto ni reusando una contrasena
+    del historial de git (el repo es publico)."""
+    calls = []
+    monkeypatch.setattr(escama, "load_env", lambda: dict(escama.DEFAULTS))
+    monkeypatch.setattr(escama, "run", lambda *a, **k: calls.append(a[0]) or type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    rc = escama.do_start()
+    assert rc == 1
+    assert not any(c[:1] == ["hostapd"] for c in calls), "no hostapd sin passphrase"
+
+
+def test_kill_procs_dnsmasq_solo_por_pidfile(monkeypatch, tmp_path):
+    """El dnsmasq de escama se mata por pidfile, NUNCA por nombre: LXC corre el
+    suyo para lxcbr0 y un pkill -x lo romperia. hostapd sigue por nombre (es
+    exclusivo de escama)."""
+    pid = tmp_path / "pid"
+    pid.write_text("123\n")
+    monkeypatch.setattr(escama, "PIDFILE", str(pid))
+    calls = []
+
+    def fake_run(cmd, capture=True, **_kw):
+        calls.append(cmd)
+        return None
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama.time, "sleep", lambda s: None)
+    escama._kill_procs()
+    planas = [" ".join(c) for c in calls]
+    assert "kill 123" in planas and "kill -9 123" in planas, planas
+    assert any("hostapd" in p for p in planas), "hostapd sigue matandose por nombre"
+    assert not any("dnsmasq" in p for p in planas), "NUNCA pkill por nombre de dnsmasq"
+
+
+def test_run_devuelve_none_si_el_binario_no_existe(monkeypatch):
+    """Maquina pelada sin iw: degradar a None (los callers ya lo manejan), no
+    traceback."""
+    def boom(*a, **k):
+        raise FileNotFoundError("iw")
+    monkeypatch.setattr(escama.subprocess, "run", boom)
+    assert escama.run(["iw", "dev", "info"]) is None
+
+
+def test_run_ro_nunca_prefija_sudo(monkeypatch):
+    """Los comandos de SOLO LECTURA nunca llevan sudo: escama status sin
+    launcher no debe pedir password (y sin TTY, sudo falla en silencio)."""
+    vistos = []
+
+    def fake(*a, **k):
+        vistos.append(a[0])
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    monkeypatch.setattr(escama.subprocess, "run", fake)
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.delenv("ESCAMA_VIA_LAUNCHER", raising=False)
+    escama.run(["iw", "dev", "info"], ro=True)
+    assert vistos[-1] == ["iw", "dev", "info"], "ro=True nunca antepone sudo"
+    escama.run(["ip", "link", "set", "x", "up"])
+    assert vistos[-1][0] == "sudo", "lo mutante, sin root ni launcher, pide sudo"
+
+
+def test_reload_otro_driver_no_toca_rmmod(monkeypatch, capsys):
+    """El reload automatico era un truco del DKMS 8192eu. Con otro driver en
+    memoria (p. ej. aic8800_fdrv) rmmod del modulo equivocado no arregla nada:
+    degradar con informacion, sin rmmod."""
+    monkeypatch.setattr(escama, "iface_exists", lambda x: True)
+    monkeypatch.setattr(escama, "_ap_phy", lambda: "phy0")
+    monkeypatch.setattr(escama, "_driver_de", lambda a: "aic8800_fdrv")
+    calls = []
+
+    def fake_run(c, capture=True, **_kw):
+        calls.append(c)
+        return type("R", (), {"returncode": 0, "stdout": "* IBSS\n", "stderr": ""})()
+    monkeypatch.setattr(escama, "run", fake_run)
+    escama.reload_module_if_needed("wlx020204050607")
+    out = capsys.readouterr().out
+    assert "DEGRADADO" in out and "aic8800_fdrv" in out
+    assert not any(c[:1] == ["rmmod"] for c in calls), "no rmmod de otro driver"
+    assert not any(c[:1] == ["modprobe"] for c in calls)
+
+
+def test_save_config_preserva_comentarios_y_claves_ajenas(tmp_path, monkeypatch):
+    """save_config reescribe SOLO las claves conocidas: los comentarios y las
+    claves ajenas del usuario se conservan (la version vieja borraba ~40
+    lineas de documentacion)."""
+    toml = tmp_path / "escama.toml"
+    toml.write_text(
+        "# mi config casera\n"
+        'SSID = "red-vieja"\n'
+        "# comentario entre claves\n"
+        'CLAVE_AJENA = "no tocar"\n'
+        'DNS1 = "1.1.1.1"\n'
+    )
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(toml))
+    cfg = dict(escama.DEFAULTS, SSID="red-nueva", DNS1="1.1.1.1")
+    escama.save_config(cfg)
+    out = toml.read_text()
+    assert "# mi config casera" in out, "los comentarios del usuario NO se borran"
+    assert "# comentario entre claves" in out
+    assert 'CLAVE_AJENA = "no tocar"' in out, "claves ajenas se conservan"
+    assert 'SSID = "red-nueva"' in out
+    assert 'SSID = "red-vieja"' not in out
+    for k in escama.DEFAULTS:  # faltantes se agregan
+        assert f"{k} = " in out, k
+    with open(toml, "rb") as f:  # el resultado vuelve a ser TOML valido
+        d = tomllib.load(f)
+    assert d["SSID"] == "red-nueva"
+
+
+def test_save_config_comenta_duplicadas(tmp_path, monkeypatch):
+    """Claves repetidas: la primera gana y el resto se comenta (TOML no
+    admite duplicados y el archivo debe seguir parseando)."""
+    toml = tmp_path / "escama.toml"
+    toml.write_text('SSID = "a"\nSSID = "b"\n')
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(toml))
+    escama.save_config(dict(escama.DEFAULTS, SSID="c"))
+    with open(toml, "rb") as f:
+        d = tomllib.load(f)
+    assert d["SSID"] == "c"
+    assert "# duplicada" in toml.read_text()
