@@ -1897,3 +1897,222 @@ def test_save_config_comenta_duplicadas(tmp_path, monkeypatch):
         d = tomllib.load(f)
     assert d["SSID"] == "c"
     assert "# duplicada" in toml.read_text()
+
+
+# ---------------------------------------------------------------------------
+# rename: productiza los renombres manuales udev por MAC (stonepi, wn8200nd)
+# ---------------------------------------------------------------------------
+
+def _rename_entorno(monkeypatch, tmp_path, old="wlx020304050607", new="wifi-usb",
+                    mac="02:1a:2b:3c:4d:01", wifi=True, tipo_ap=False,
+                    ap_iface="", wan_iface="", euid=0):
+    """Banco de pruebas comun: sysfs simulado, reglas udev en tmp_path,
+    config en tmp_path, todo en orden (geteuid parametrizable)."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: euid)
+    monkeypatch.setattr(escama, "iface_exists",
+                        lambda x: x in (old, "otra-ifi"))
+    monkeypatch.setattr(escama, "iface_wifi", lambda x: wifi)
+    monkeypatch.setattr(escama, "iface_type_ap", lambda x: tipo_ap)
+    monkeypatch.setattr(escama, "_mac_de", lambda x: mac)
+    monkeypatch.setattr(escama, "RENAME_RULES",
+                        str(tmp_path / "76-escama-ifaces.rules"))
+    legacy1 = tmp_path / "70-persistent-net.rules"
+    legacy2 = tmp_path / "99-stonepi-ap.rules"
+    legacy1.write_text(
+        '# This file was automatically generated\n'
+        'ACTION=="add", SUBSYSTEM=="net", DRIVERS=="?*", '
+        'ATTR{address}=="02:1a:2b:3c:4d:02", NAME="wn8200nd"\n')
+    legacy2.write_text(
+        "# regla manual: renombrado a mano para el AP\n"
+        'SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="02:1a:2b:3c:4d:03", '
+        'NAME="stonepi"\n')
+    monkeypatch.setattr(escama, "RENAME_LEGACY", (str(legacy1), str(legacy2)))
+    toml = tmp_path / "escama.toml"
+    toml.write_text("# config casera\n"
+                    f'AP_IFACE = "{ap_iface or "wn8200nd"}"\n'
+                    f'WAN_IFACE = "{wan_iface or "stonepi"}"\n')
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(toml))
+    monkeypatch.setattr(escama, "load_env", lambda: dict(
+        escama.DEFAULTS, AP_IFACE=ap_iface or "wn8200nd",
+        WAN_IFACE=wan_iface or "stonepi"))
+    return legacy1, legacy2, toml
+
+
+def test_do_rename_valida_nombre(monkeypatch, tmp_path):
+    """Nombre invalido: rechaza ANTES de tocar nada (sin reglas, sin comandos)."""
+    calls = []
+    _rename_entorno(monkeypatch, tmp_path)
+    monkeypatch.setattr(escama, "run", lambda c, **k: calls.append(c) or None)
+    for nuevo in ("a" * 16, "9wifi", "con espacio", "con.punto", "lo", ""):
+        rc = escama.do_rename(["wlx020304050607", nuevo])
+        assert rc == 1, nuevo
+    assert calls == [], "ningun comando ni escritura con nombre invalido"
+    assert not os.path.exists(tmp_path / "76-escama-ifaces.rules")
+
+
+def test_do_rename_requiere_wifi_y_root(monkeypatch, tmp_path):
+    """Solo adaptadores WiFi (phy80211) y solo con sudo directo (la regla udev
+    escribe /etc: el launcher rootless no da DAC override)."""
+    _rename_entorno(monkeypatch, tmp_path, wifi=False)
+    rc = escama.do_rename(["wlx020304050607", "nuevo"])
+    assert rc == 1
+
+    _rename_entorno(monkeypatch, tmp_path, euid=1000)
+    rc = escama.do_rename(["wlx020304050607", "nuevo"])
+    assert rc == 1
+
+
+def test_do_rename_rechaza_colision_y_si_esta_en_ap(monkeypatch, tmp_path):
+    """No renombrar sobre un nombre existente, ni una iface en modo AP (baja
+    el AP primero: un rename a mitad de hostapd rompe las dos cosas)."""
+    _rename_entorno(monkeypatch, tmp_path, new="otra-ifi")
+    calls = []
+    monkeypatch.setattr(escama, "run", lambda c, **k: calls.append(c) or None)
+    assert escama.do_rename(["wlx020304050607", "otra-ifi"]) == 1
+    assert calls == []
+
+    _rename_entorno(monkeypatch, tmp_path, tipo_ap=True)
+    calls.clear()
+    assert escama.do_rename(["wlx020304050607", "nuevo"]) == 1
+    assert calls == []
+
+
+def test_do_rename_sin_argumentos(monkeypatch, capsys):
+    assert escama.do_rename([]) == 2
+    assert escama.do_rename(["solo-uno"]) == 2
+    assert "rename <iface>" in capsys.readouterr().err
+
+
+def test_do_rename_secuencia_en_vivo(monkeypatch, tmp_path, capsys):
+    """managed no -> down -> rename -> up -> managed yes, y revincula el
+    perfil NM que estaba activo sobre el nombre viejo."""
+    legacy1, legacy2, toml = _rename_entorno(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_run(cmd, capture=True, **_kw):
+        calls.append(cmd)
+        if cmd[:3] == ["nmcli", "-t", "-f"]:
+            class R:
+                returncode = 0
+                stdout = "internet:wlx020304050607\notra:red\n"
+                stderr = ""
+            return R()
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    rc = escama.do_rename(["wlx020304050607", "wifi-usb"])
+    assert rc == 0
+    planas = [" ".join(c) for c in calls]
+    orden = [p for p in planas if p.startswith("ip link set")]
+    assert orden == ["ip link set wlx020304050607 down",
+                     "ip link set wlx020304050607 name wifi-usb",
+                     "ip link set wifi-usb up"], orden
+    assert "nmcli device set wlx020304050607 managed no" in planas
+    assert "nmcli device set wifi-usb managed yes" in planas
+    assert any("connection modify internet connection.interface-name wifi-usb" in p
+               for p in planas), "perfil NM activo en el nombre viejo debe revincularse"
+    assert not any("connection modify otra" in p for p in planas)
+
+
+def test_do_rename_fallo_kernel_rollback(monkeypatch, tmp_path, capsys):
+    """Si el kernel rechaza el rename, rollback a up+managed yes y rc 1, con
+    el motivo real del comando fallido (no un generico)."""
+    _rename_entorno(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(escama, "_motivo_fallo",
+                        lambda r, cmd: f"{cmd}: Operation not permitted")
+
+    def fake_run(cmd, capture=True, **_kw):
+        calls.append(cmd)
+        if cmd[:3] == ["ip", "link", "set"] and "name" in cmd:
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = "Operation not permitted"
+            return R()
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    monkeypatch.setattr(escama, "run", fake_run)
+    rc = escama.do_rename(["wlx020304050607", "wifi-usb"])
+    assert rc == 1
+    planas = [" ".join(c) for c in calls]
+    assert "ip link set wlx020304050607 up" in planas, "rollback: deja la iface arriba"
+    assert "nmcli device set wlx020304050607 managed yes" in planas
+    captura = capsys.readouterr()
+    out = captura.out + captura.err
+    assert "Operation not permitted" in out, "motivo real del fallo"
+    # la regla udev igual quedo escrita: aplica en el proximo boot/plug
+    assert 'NAME="wifi-usb"' in (tmp_path / "76-escama-ifaces.rules").read_text()
+
+
+def test_do_rename_regla_udev_y_retiro_legacy(monkeypatch, tmp_path):
+    """Escribe la regla por MAC en el archivo de escama y retira de los
+    legacy la regla de esa misma MAC (con su comentario). Idempotente."""
+    legacy1, legacy2, toml = _rename_entorno(
+        monkeypatch, tmp_path, old="wn8200nd",
+        mac="02:1a:2b:3c:4d:02")  # la MAC del wn8200nd en 70-persistent-net
+    calls = []
+    monkeypatch.setattr(escama, "run", lambda c, **k: calls.append(c) or type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    rc = escama.do_rename(["wn8200nd", "wifi-usb"])
+    assert rc == 0
+    reglas = (tmp_path / "76-escama-ifaces.rules").read_text()
+    assert 'ATTR{address}=="02:1a:2b:3c:4d:02", NAME="wifi-usb"' in reglas
+    # legacy: la regla de esa MAC se retiro (con el comentario de arriba)
+    l1 = legacy1.read_text()
+    assert "02:1a:2b:3c:4d:02" not in l1
+    assert 'NAME="wn8200nd"' not in l1, "la regla retirada no deja huerfana"
+    assert "This file was automatically generated" in l1, "resto del archivo intacto"
+    # la otra MAC (stonepi) no se toca: el retiro es SOLO por la MAC renombrada
+    assert 'NAME="stonepi"' in legacy2.read_text()
+    # idempotente: re-corrida no duplica (wifi-usb ya existe tras el rename)
+    existe = {"wifi-usb"}
+    monkeypatch.setattr(escama, "iface_exists", lambda x: x in existe)
+    rc = escama.do_rename(["wifi-usb", "wifi-usb2"])
+    assert rc == 0
+    reglas = (tmp_path / "76-escama-ifaces.rules").read_text()
+    assert reglas.count("02:1a:2b:3c:4d:02") == 1, "una sola regla por MAC"
+
+
+def test_do_rename_regla_otros_mac_con_ese_nombre_rechaza(monkeypatch, tmp_path):
+    """Otra MAC ya reclama el nombre en el archivo de escama: no crear la
+    ambiguedad (dos reglas pisan el mismo NAME)."""
+    _rename_entorno(monkeypatch, tmp_path)
+    reglas = tmp_path / "76-escama-ifaces.rules"
+    reglas.write_text('SUBSYSTEM=="net", ACTION=="add", '
+                      'ATTR{address}=="aa:bb:cc:dd:ee:ff", NAME="wifi-usb"\n')
+    monkeypatch.setattr(escama, "run", lambda c, **k: None)
+    rc = escama.do_rename(["wlx020304050607", "wifi-usb"])
+    assert rc == 1
+
+
+def test_do_rename_sincroniza_config(monkeypatch, tmp_path):
+    """Si AP_IFACE o WAN_IFACE apuntaban al nombre viejo, el toml se
+    actualiza (save_config conserva los comentarios)."""
+    legacy1, legacy2, toml = _rename_entorno(
+        monkeypatch, tmp_path, wan_iface="wlx020304050607")
+    calls = []
+    monkeypatch.setattr(escama, "run", lambda c, **k: calls.append(c) or type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    rc = escama.do_rename(["wlx020304050607", "wifi-usb"])
+    assert rc == 0
+    out = toml.read_text()
+    assert "# config casera" in out, "comentarios intactos"
+    assert 'WAN_IFACE = "wifi-usb"' in out
+    assert "wlx020304050607" not in out
+    with open(toml, "rb") as f:
+        d = tomllib.load(f)
+    assert d["WAN_IFACE"] == "wifi-usb"
+    assert d["AP_IFACE"] == "wn8200nd", "solo las claves que apuntaban al viejo"
+
+    # sin claves apuntando al viejo: toml sin cambios
+    legacy1, legacy2, toml2 = _rename_entorno(monkeypatch, tmp_path)
+    antes = toml2.read_text()
+    escama.do_rename(["wlx020304050607", "wifi-usb"])
+    assert toml2.read_text() == antes, "sin claves afectadas, no reescribe"

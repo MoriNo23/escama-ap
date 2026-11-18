@@ -43,7 +43,7 @@
 
 | Archivo | Rol |
 |---------|-----|
-| `opt/escama/escama.py` | Núcleo. Acciones: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|preflight` |
+| `opt/escama/escama.py` | Núcleo. Acciones: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|rename\|preflight` |
 | `opt/escama/escama-tui.py` | TUI whiptail. Edita `escama.toml`, regenera confs |
 | `opt/escama/escama-launch.c` | Launcher ELF rootless (capabilities → núcleo); se compila a `/opt/escama/escama-launch` |
 | `etc/escama/escama.toml` | **Única fuente de verdad** |
@@ -54,7 +54,7 @@
 | `etc/systemd/user/escama-egress.service` | Unit de usuario — watcher de egress en modo rootless |
 | `VERSION` | Fuente única de la versión, leída en runtime por los tres puntos de entrada |
 | `CHANGELOG.md` | Historial de versiones (0.x retrospectiva + semver por change) |
-| `tests/test_escama.py` | 105 unit tests, mocks de system calls (comando en §7) |
+| `tests/test_escama.py` | 124 unit tests, mocks de system calls (comando en §7) |
 | `setup.cfg` | Config mutmut |
 
 ## 3. `escama.toml` (fuente de verdad)
@@ -108,6 +108,24 @@ WAN_IFACE="wn8200nd"
 ```
 `sudo escama.py restart`. El masquerade y validaciones usan estos valores; no hay
 hardcodeos. Precaución: la WAN debe tener internet real tras el cambio.
+
+## 5b. Renombrar adaptadores (udev por MAC)
+
+Productiza el renombre manual de siempre (`stonepi`, `wn8200nd`, antes
+`wlx<MAC>`):
+
+```bash
+sudo escama rename wlx020304050607 wifi-usb
+```
+
+Solo WiFi (sysfs `phy80211`); nombre ≤15 chars, `[A-Za-z0-9_-]`, sin dígito
+inicial. Deja UNA regla por MAC en `/etc/udev/rules.d/76-escama-ifaces.rules`
+(idempotente) y **retira** la regla manual vieja de esa misma MAC de
+`70-persistent-net.rules` / `99-stonepi-ap.rules`. Aplica en vivo
+(nmcli managed no → down → `ip link set name` → up → managed yes, revinculando
+el perfil NM activo). Sincroniza `AP_IFACE`/`WAN_IFACE` del `escama.toml` si
+apuntaban al nombre viejo. Solo sudo directo (el launcher rootless da caps de
+red, no escritura en `/etc`). Se niega si la iface está en modo AP.
 
 ## 6. Reconexión tras plug/unplug
 

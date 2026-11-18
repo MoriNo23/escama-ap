@@ -43,7 +43,7 @@
 
 | File | Role |
 |------|------|
-| `opt/escama/escama.py` | Core. Actions: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|preflight` |
+| `opt/escama/escama.py` | Core. Actions: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|rename\|preflight` |
 | `opt/escama/escama-tui.py` | whiptail TUI. Edits `escama.toml`, regenerates confs |
 | `opt/escama/escama-launch.c` | Rootless ELF launcher (capabilities → core); compiled to `/opt/escama/escama-launch` |
 | `etc/escama/escama.toml` | **Single source of truth** |
@@ -54,7 +54,7 @@
 | `etc/systemd/user/escama-egress.service` | User unit — egress watcher in rootless mode |
 | `VERSION` | Single version source, read at runtime by the three entry points |
 | `CHANGELOG.md` | Version history (0.x retrospective + semver per change) |
-| `tests/test_escama.py` | 105 unit tests, system-call mocks (command in §7) |
+| `tests/test_escama.py` | 124 unit tests, system-call mocks (command in §7) |
 | `setup.cfg` | mutmut config |
 
 ## 3. `escama.toml` (source of truth)
@@ -106,6 +106,23 @@ WAN_IFACE="wn8200nd"
 ```
 `sudo escama.py restart`. Masquerade and validation use these values; no hardcodes.
 Caution: the WAN must have real internet after the swap.
+
+## 5b. Renaming adapters (udev by MAC)
+
+Productizes the old manual rename (`stonepi`, `wn8200nd`, formerly `wlx<MAC>`):
+
+```bash
+sudo escama rename wlx020304050607 wifi-usb
+```
+
+WiFi-only (sysfs `phy80211`); name ≤15 chars, `[A-Za-z0-9_-]`, no leading digit.
+Writes ONE rule per MAC to `/etc/udev/rules.d/76-escama-ifaces.rules`
+(idempotent) and removes the stale manual rule for that MAC from
+`70-persistent-net.rules` / `99-stonepi-ap.rules`. Applies live
+(nmcli managed no → down → `ip link set name` → up → managed yes, rebinding the
+active NM profile). Syncs `AP_IFACE`/`WAN_IFACE` in `escama.toml` when they
+pointed at the old name. Direct sudo only (the launcher rootless gives network
+capabilities, not file-write in `/etc`). Refuses while the iface is in AP mode.
 
 ## 6. Reconnect after plug/unplug
 

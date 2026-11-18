@@ -131,6 +131,7 @@ def main():
              "8", f"DNS: {cfg['DNS1']}, {cfg['DNS2']}",
              "9", f"Salida VPN: {cfg['EGRESS_MODE']} ({cfg['VPN_IFACE'] or 'auto-detect'})",
              "A", f"DNS con VPN: {cfg['VPN_DNS1'] or '(usa DNS normal)'}",
+             "R", "Renombrar adaptador WiFi (udev)",
              "E", "EDITAR CONFIG (nvim)",
              "S", "GUARDAR Y SALIR"],
         )
@@ -200,6 +201,27 @@ def main():
                                  items, 20, 66, min(len(tuns) + 1, 12))
             if pick is not None:
                 cfg["VPN_IFACE"] = pick
+        elif choice == "R":
+            # delega TODO en `escama rename` (validacion, udev, NM, toml):
+            # la TUI no duplica logica, solo pregunta y lanza.
+            wifis = [d for d in list_ifaces() if escama.iface_wifi(d)]
+            if not wifis:
+                subprocess.run(["whiptail", "--msgbox",
+                                "No hay adaptadores WiFi presentes.",
+                                "8", "50"], check=False)
+            else:
+                items = [i for pair in [(x, x) for x in wifis] for i in pair]
+                sel = whiptail_menu("Renombrar adaptador",
+                                    "Cual adaptador?", items, 15, 60,
+                                    min(len(wifis), 8))
+                if sel:
+                    nombre = whiptail_input(
+                        "Nuevo nombre",
+                        "Nuevo nombre (max 15, letras/digitos/-/_).\n"
+                        "Ej: wlx020304050607 -> wifi-usb:", "")
+                    if nombre:
+                        subprocess.run(["escama", "rename", sel, nombre],
+                                       check=False)
         elif choice == "A":
             v = whiptail_input(
                 "DNS con VPN",

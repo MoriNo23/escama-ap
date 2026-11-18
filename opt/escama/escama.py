@@ -1245,6 +1245,195 @@ def do_watch(interval: int = 5) -> int:
 
 
 # ---------------------------------------------------------------------------
+# rename: productiza el renombre manual udev por MAC (stonepi, wn8200nd)
+# ---------------------------------------------------------------------------
+
+# Archivo de reglas udev de escama (una por MAC, idempotente) y los archivos
+# legacy escritos a mano que se retiran cuando escama toma el mismo MAC.
+RENAME_RULES = "/etc/udev/rules.d/76-escama-ifaces.rules"
+RENAME_LEGACY = ("/etc/udev/rules.d/70-persistent-net.rules",
+                 "/etc/udev/rules.d/99-stonepi-ap.rules")
+
+
+def iface_wifi(iface: str) -> bool:
+    """True si la iface es un adaptador WiFi real (sysfs expone phy80211)."""
+    return os.path.isdir(f"/sys/class/net/{iface}/phy80211")
+
+
+def _mac_de(iface: str) -> str:
+    try:
+        with open(f"/sys/class/net/{iface}/address") as f:
+            return f.read().strip().lower()
+    except OSError:
+        return ""
+
+
+def _nombre_valido(nombre: str) -> str:
+    """Motivo de rechazo, o "" si el nombre sirve (IFNAMSIZ=16 con NUL: 15)."""
+    if not nombre or len(nombre) > 15:
+        return "nombre vacio o de mas de 15 caracteres (limite IFNAMSIZ)"
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", nombre):
+        return ("caracteres invalidos: solo letras, digitos, - y _, "
+                "y no puede empezar con digito (lo exige el kernel)")
+    if nombre == "lo":
+        return "'lo' es la loopback, no es un nombre valido"
+    return ""
+
+
+def _escribir_regla_udev(mac: str, name: str) -> None:
+    """Deja UNA regla por MAC en RENAME_RULES (idempotente).
+
+    Rechaza si OTRA MAC ya reclama el mismo NAME en ese archivo: dos reglas
+    con el mismo NAME dejan el resultado al orden de aplicacion de udev.
+    """
+    head = ("# reglas udev de escama (`escama rename`): una por MAC, "
+            "idempotentes\n")
+    try:
+        with open(RENAME_RULES, encoding="utf-8") as f:
+            lineas = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        lineas = [head]
+    mac_lc = mac.lower()
+    clave_mac = f'attr{{address}}=="{mac_lc}"'
+    lineas = [l for l in lineas if not (l.lstrip().startswith("SUBSYSTEM")
+                                        and clave_mac in l.lower())]
+    for l in lineas:
+        if (l.lstrip().startswith("SUBSYSTEM")
+                and f'name="{name.lower()}"' in l.lower()
+                and clave_mac not in l.lower()):
+            raise SystemExit(
+                f"ERROR: {RENAME_RULES} ya usa el nombre {name} para otra MAC; "
+                "elige otro nombre.\n" + l.strip())
+    lineas.append(f'SUBSYSTEM=="net", ACTION=="add", '
+                  f'ATTR{{address}}=="{mac}", NAME="{name}"\n')
+    os.makedirs(os.path.dirname(RENAME_RULES), exist_ok=True)
+    with open(RENAME_RULES, "w", encoding="utf-8") as f:
+        f.writelines(lineas)
+
+
+def _retirar_reglas_legacy(mac: str) -> list:
+    """Quita de los archivos legacy la regla de ese MAC. Devuelve los archivos
+    que toco. Los comentarios se dejan: distinguir header de regla es
+    imposible y un comentario huerfano es inofensivo (el archivo es del usuario).
+    """
+    tocados = []
+    mac_lc = mac.lower()
+    for path in RENAME_LEGACY:
+        try:
+            with open(path, encoding="utf-8") as f:
+                lineas = f.readlines()
+        except OSError:
+            continue
+        keep = [l for l in lineas
+                if not ("attr{address}" in l.lower() and mac_lc in l.lower())]
+        if len(keep) != len(lineas):
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(keep)
+            tocados.append(path)
+    return tocados
+
+
+def _perfiles_nm_en(iface: str) -> list:
+    """Perfiles NM activos atados a esa iface (antes del rename)."""
+    p = run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show",
+             "--active"], ro=True)
+    if p is None or p.returncode != 0:
+        return []
+    return [l.rsplit(":", 1)[0] for l in p.stdout.splitlines()
+            if l.rsplit(":", 1)[-1] == iface]
+
+
+def do_rename(args: list) -> int:
+    """escama rename <iface> <nuevo-nombre> — renombre vivo + persistente.
+
+    Lo que antes se hacia a mano (regla udev por MAC + reboot: stonepi,
+    wn8200nd) queda productizado: regla udev idempotente, retiro de la regla
+    manual vieja de la misma MAC, rename en vivo con NM y sincronia del
+    escama.toml. Requiere sudo directo: la regla escribe en /etc y el
+    launcher rootless no da DAC override.
+    """
+    if len(args) != 2:
+        print("Uso: escama rename <iface> <nuevo-nombre>", file=sys.stderr)
+        print("  Ej: sudo escama rename wlx020304050607 wifi-usb",
+              file=sys.stderr)
+        return 2
+    viejo, nuevo = args
+    if os.geteuid() != 0:
+        print("El rename escribe reglas udev en /etc: necesita sudo directo.\n"
+              "  sudo escama rename " + " ".join(args), file=sys.stderr)
+        return 1
+    motivo = _nombre_valido(nuevo)
+    if motivo:
+        log(f"ERROR: nombre invalido ({motivo}).")
+        return 1
+    if not iface_exists(viejo):
+        log(f"ERROR: {viejo} no presente.")
+        return 1
+    if not iface_wifi(viejo):
+        log(f"ERROR: {viejo} no es un adaptador WiFi (sin phy80211).")
+        return 1
+    if viejo == nuevo:
+        log(f"Nada que hacer: {viejo} ya se llama asi.")
+        return 0
+    if iface_exists(nuevo):
+        log(f"ERROR: ya existe una interfaz llamada {nuevo}.")
+        return 1
+    if iface_type_ap(viejo):
+        log("ERROR: la interfaz esta en modo AP. Baja el AP primero "
+            "(sudo escama stop) y renombra despues.")
+        return 1
+    mac = _mac_de(viejo)
+    if not mac:
+        log(f"ERROR: no pude leer la MAC de {viejo} (sysfs).")
+        return 1
+
+    perfiles = _perfiles_nm_en(viejo)
+
+    # 1) persistente: regla nueva + retiro de la manual vieja (misma MAC)
+    try:
+        _escribir_regla_udev(mac, nuevo)
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    legacy = _retirar_reglas_legacy(mac)
+    log(f"Regla udev escrita ({mac} -> {nuevo}) en {RENAME_RULES}")
+    for path in legacy:
+        log(f"Retirada la regla manual de {mac} en {path}")
+
+    # 2) vivo: down -> rename -> up (el kernel exige iface abajo)
+    run(["nmcli", "device", "set", viejo, "managed", "no"])
+    run(["ip", "link", "set", viejo, "down"])
+    r = run(["ip", "link", "set", viejo, "name", nuevo])
+    if r is None or r.returncode != 0:
+        log("ERROR: el kernel rechazo el rename "
+            + _motivo_fallo(r, "ip link set name"))
+        run(["ip", "link", "set", viejo, "up"])
+        run(["nmcli", "device", "set", viejo, "managed", "yes"])
+        log("La regla udev queda escrita: aplica en el proximo boot o "
+            "re-plug. Nada mas cambio.")
+        return 1
+    run(["ip", "link", "set", nuevo, "up"])
+    run(["nmcli", "device", "set", nuevo, "managed", "yes"])
+    for nombre in perfiles:
+        run(["nmcli", "connection", "modify", nombre,
+             "connection.interface-name", nuevo])
+    if perfiles:
+        log(f"Perfil/es NM revinculado/s al nombre nuevo: {', '.join(perfiles)}")
+
+    # 3) config: solo las claves que apuntaban al nombre viejo
+    cfg = load_env()
+    tocadas = [k for k in ("AP_IFACE", "WAN_IFACE") if cfg.get(k) == viejo]
+    if tocadas:
+        for k in tocadas:
+            cfg[k] = nuevo
+        save_config(cfg)
+        log(f"escama.toml actualizado: {', '.join(tocadas)} -> {nuevo}")
+        log("Si ese adaptador es el AP: sudo escama genconfig + restart.")
+    log(f"OK: {viejo} ahora es {nuevo} (vivo y persistente).")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Preflight y auto-instalacion (spec `auto-instalacion`)
 # ---------------------------------------------------------------------------
 
@@ -1522,6 +1711,8 @@ def main(args: list = None) -> int:
         print("  egress     Re-evalua la salida (VPN/WAN) sin tirar el AP")
         print("             uso: escama egress [auto|vpn|wan|<iface>]")
         print("  watch      Loop que sigue el estado del tunnel y reaplica NAT")
+        print("  rename     Renombra un adaptador WiFi (vivo + regla udev por MAC)")
+        print("             uso: escama rename <iface> <nuevo-nombre>")
         print("  edit       Abre escama.toml en $EDITOR (nvim por defecto)")
         print("  preflight  Estado de la instalacion (solo lectura, sin sudo)")
         print("\nOpciones: --help|-h  --version|-v")
@@ -1568,6 +1759,8 @@ def main(args: list = None) -> int:
         return do_watch(interval)
     elif action == "preflight":
         return do_preflight()
+    elif action == "rename":
+        return do_rename(argv[1:])
     elif action == "edit":
         editor = os.environ.get("EDITOR", "nvim")
         os.execvp(editor, [editor, CONFIG_FILE])

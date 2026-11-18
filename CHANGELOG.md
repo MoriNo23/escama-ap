@@ -9,6 +9,24 @@ declared a version, así que se reconstruyen por épocas a partir de los commits
 del repo. Desde 1.0.0 el bump es explícito: cada change que altera comportamiento
 incluye el bump en su `tasks.md` y una entrada acá.
 
+## 2.1.0 — 2026-11-17
+
+### Agregado
+- **`escama rename <iface> <nuevo-nombre>`**: productiza el renombre manual de
+  adaptadores WiFi por regla udev (lo que se hacía a mano con `stonepi` y
+  `wn8200nd`, antes `wlx<MAC>`). Deja una regla por MAC en
+  `/etc/udev/rules.d/76-escama-ifaces.rules` (idempotente), retira la regla
+  manual vieja de esa misma MAC de `70-persistent-net.rules` y
+  `99-stonepi-ap.rules`, renombra en vivo (nmcli managed no → down →
+  `ip link set name` → up → managed yes) revinculando el perfil NM activo, y
+  sincroniza `AP_IFACE`/`WAN_IFACE` del `escama.toml` si apuntaban al nombre
+  viejo. Validación: solo WiFi (phy80211), nombre ≤15 chars
+  (`[A-Za-z0-9_-]`, sin dígito inicial), sin colisión, rechaza si la iface
+  está en modo AP (`sudo escama stop` primero). Requiere sudo directo.
+- TUI: entrada "R" para renombrar (delega 100% en `escama rename`).
+- 9 tests nuevos (124 total): validación, secuencia viva, rollback con motivo
+  real, idempotencia de regla, retiro legacy, sincronía del toml.
+
 ## 2.0.0 — 2026-11-17
 
 ### Roto (breaking)

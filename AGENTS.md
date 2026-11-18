@@ -30,7 +30,7 @@ basename y rompe la colección (import mismatch). Usa siempre el path explícito
 - Docs: `docs/` = inglés, `docs-es/` = español (roles invertidos en 2026-08).
 - Código y docstrings en español; funciones/vars `snake_case`.
 - CLI: parseo manual de `argv` en `main(args=None)` (NO argparse). Subcomandos de
-  `escama.py`: `start|stop|restart|status|reconnect|genconfig|egress|watch`.
+  `escama.py`: `start|stop|restart|status|reconnect|genconfig|egress|watch|rename`.
   Ambos CLIs aceptan `--help|-h|help` y `--version|-v|version` (requisito no negociable).
 - `run()` auto-prefija `sudo` si `os.geteuid() != 0`. Path real de confs: `/etc/escama/*`.
 - Config: `DEFAULTS` (en escama.py) + `load_env()` mergea `escama.toml` por encima.

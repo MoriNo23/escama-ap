@@ -13,7 +13,7 @@ Consolidado de 6 scripts bash sueltos → **1 librería Python + 1 TUI**. Menos 
 única fuente de verdad.
 
 ```
-opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig|egress|watch|preflight
+opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig|egress|watch|rename|preflight
 opt/escama/escama-launch.c  # launcher ELF rootless (capabilities → núcleo); se compila a /opt/escama/escama-launch
 opt/escama/escama-tui.py    # TUI (whiptail): edita escama.toml y regenera confs
 etc/escama/escama.toml       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID, etc.)
@@ -23,7 +23,7 @@ etc/systemd/system/escama-ap.service      # ExecStart=/opt/escama/escama.py star
 etc/systemd/system/escama-egress.service  # watcher VPN: escama.py watch 5
 etc/systemd/user/escama-ap.service        # autostart sin sudo (rootless) al iniciar sesión
 etc/systemd/user/escama-egress.service    # watcher VPN en modo rootless
-tests/test_escama.py        # 115 unit tests (mock de system calls, no toca el sistema)
+tests/test_escama.py        # 124 unit tests (mock de system calls, no toca el sistema)
 setup.cfg                   # config de mutmut (mutation testing)
 install.sh                  # ciclo de vida: install|uninstall|enable|disable|status|enable --user
 ```
@@ -73,6 +73,7 @@ sudo escama.py genconfig     # regenera hostapd/dnsmasq confs desde escama.toml
 sudo escama.py egress        # re-evalua salida VPN/WAN sin tirar el AP
 sudo escama.py egress vpn    # forzar salida por tunnel (auto|vpn|wan|<iface>)
 sudo escama.py watch         # loop: sigue el tunnel y reaplica NAT solo
+sudo escama.py rename wlanX nuevo-nombre  # renombra adaptador WiFi (vivo + udev por MAC)
 escama preflight             # comprueba la maquina (componentes, version, rootless viable)
 
 sudo escama-tui              # menú interactivo (whiptail) para editar escama.toml
@@ -167,6 +168,21 @@ El masquerade y las validaciones usan estos valores; no hay hardcodeos que rompa
 (NOTA: hoy stonepi da internet al equipo y al TV vía NAT; invertirlo requiere que
 wn8200nd sea cliente con internet.)
 
+## Renombrar adaptadores (udev por MAC)
+
+Lo que antes era manual (regla udev a mano + reboot: `stonepi`, `wn8200nd`, que
+antes se llamaban `wlx<MAC>`), ahora lo hace escama:
+
+```bash
+sudo escama rename wlx020304050607 wifi-usb
+```
+
+- Solo adaptadores WiFi (sysfs `phy80211`). Nombre: ≤15 caracteres, letras/dígitos/`-`/`_`, sin empezar con dígito.
+- Deja UNA regla por MAC en `/etc/udev/rules.d/76-escama-ifaces.rules` (idempotente) y **retira** la regla manual vieja de esa misma MAC de `70-persistent-net.rules` / `99-stonepi-ap.rules`.
+- Renombra en vivo: `nmcli managed no` → down → `ip link set name` → up → `managed yes`, y revincula el perfil NM activo del nombre viejo.
+- Sincroniza `AP_IFACE`/`WAN_IFACE` del `escama.toml` si apuntaban al nombre viejo (comentarios intactos).
+- Requiere sudo directo (la regla udev escribe en `/etc`; el launcher rootless no da permisos de escritura). Si la iface está en modo AP: `sudo escama stop` primero.
+
 ## Canal del AP (no chocar con la WAN)
 
 ```ini
@@ -182,7 +198,7 @@ y su motivo quedan en el log (`/var/log/escama-ap.log`).
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 115 tests (SIEMPRE el path explícito)
+python3 -m pytest tests/test_escama.py -q   # 124 tests (SIEMPRE el path explícito)
 ~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
 ```
 NO corras `python3 -m pytest` sin el path: `mutants/tests/` tiene el mismo
