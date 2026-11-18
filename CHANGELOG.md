@@ -1,3 +1,16 @@
+## 2.3.0 — 2026-11-17
+
+### Agregado
+- **`escama qr`**: genera el QR de conexión en la terminal para unirse al AP
+  desde el teléfono sin tipear la contraseña. Payload estándar
+  `WIFI:T:WPA;S:<ssid>;P:<pass>;;` con escaping de `\ ; , : "` (helper
+  `_wifi_qr_string`). Render vía `qrencode -t UTF8` (binario del sistema,
+  ro=True: nunca sudo). Solo lectura: corre sin sudo, igual que `status`.
+  Degradación amable: sin `qrencode` instalado imprime el string listo para
+  pegar en un generador web + la línea `sudo apt install qrencode` (rc 1).
+  `preflight` reporta `binario qrencode` como componente **opcional**: no
+  afecta el estado de la instalación ni dispara el bootstrap.
+
 ## 2.2.1 — 2026-11-17
 
 ### Corregido

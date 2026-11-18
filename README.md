@@ -57,6 +57,7 @@ sudo escama start         # bring the AP up (hostapd + dnsmasq + NAT + forwardin
 sudo escama stop          # take it down, restore the interface to client mode
 sudo escama restart       # stop + start
 sudo escama status        # current state (works without sudo)
+escama qr                 # QR to join the AP from your phone (terminal, no sudo)
 sudo escama reconnect     # re-up after unplug/replug of the adapter
 sudo escama genconfig     # regenerate hostapd/dnsmasq from escama.toml
 sudo escama egress        # re-evaluate exit path (VPN/WAN) without dropping the AP
@@ -161,6 +162,8 @@ mutation testing with `mutmut run` (config in `setup.cfg`).
 - Debian/Linux with NetworkManager (`nmcli`)
 - Python 3.10+ — stdlib only, zero dependencies
 - `hostapd`, `dnsmasq`, `iw`; `whiptail` for the TUI only
+- `qrencode` — optional, only for `escama qr` (`sudo apt install qrencode`;
+  without it the command prints the WIFI string and the install line)
 - A WiFi adapter with AP-mode support (rtl8192eu and aic8800 drivers verified)
 
 ## Documentation

@@ -2364,3 +2364,70 @@ def test_main_despacha_autorename_y_pide_sudo(monkeypatch, tmp_path, capsys):
     captura = capsys.readouterr()
     assert "modifica el sistema" in captura.out + captura.err, \
         "el gate de main avisa antes que el check interno"
+
+
+# --- qr: compartido por telefono (spec `qr-telefono`) ---
+
+def test_wifi_qr_string_formato_y_escaping():
+    """String WIFI estandar (WPA-PSK) con escaping de \\ ; , : \"."""
+    cfg = {"SSID": "escama", "WPA_PASSPHRASE": "clave123"}
+    assert escama._wifi_qr_string(cfg) == "WIFI:T:WPA;S:escama;P:clave123;;"
+    cfg = {"SSID": "mi;red", "WPA_PASSPHRASE": 'con"caracteres\\:,complicados'}
+    assert escama._wifi_qr_string(cfg) == \
+        'WIFI:T:WPA;S:mi\\;red;P:con\\"caracteres\\\\\\:\\,complicados;;'
+
+
+def test_do_qr_pide_passphrase(monkeypatch, capsys):
+    """Sin SSID o sin passphrase el QR es inutil: error apuntando al toml."""
+    monkeypatch.setattr(escama, "load_env",
+                        lambda: {"SSID": "escama", "WPA_PASSPHRASE": ""})
+    assert escama.do_qr() == 1
+    captura = capsys.readouterr()
+    assert "escama.toml" in captura.out + captura.err
+
+
+def test_do_qr_invoca_qrencode_utf8(monkeypatch, capsys):
+    """Render via qrencode -t UTF8 (ro: nunca sudo) y salida impresa."""
+    llamadas = []
+
+    def fake_run(cmd, capture=True, ro=False):
+        llamadas.append((cmd, ro))
+        class R:
+            returncode = 0
+            stdout = "▀▄█ QR █▄▀"
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    monkeypatch.setattr(escama, "load_env",
+                        lambda: {"SSID": "escama", "WPA_PASSPHRASE": "clave123"})
+    assert escama.do_qr() == 0
+    assert llamadas == [(["qrencode", "-t", "UTF8",
+                          "WIFI:T:WPA;S:escama;P:clave123;;"], True)]
+    assert "QR" in capsys.readouterr().out
+
+
+def test_do_qr_sin_binario_degrada(monkeypatch, capsys):
+    """Sin qrencode instalado: imprime el string y el comando de instalacion
+    (rc 1: el QR no se dibujo, pero el usuario no queda bloqueado)."""
+    monkeypatch.setattr(escama, "run", lambda *a, **k: None)
+    monkeypatch.setattr(escama, "load_env",
+                        lambda: {"SSID": "escama", "WPA_PASSPHRASE": "clave123"})
+    assert escama.do_qr() == 1
+    captura = capsys.readouterr()
+    texto = captura.out + captura.err
+    assert "WIFI:T:WPA;S:escama;P:clave123;;" in texto
+    assert "apt install qrencode" in texto
+
+
+def test_main_despacha_qr_rootless(monkeypatch, capsys):
+    """qr es solo lectura: corre sin root y despacha a do_qr."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(escama, "do_qr", lambda: 0)
+    assert escama.main(["qr"]) == 0
+
+
+def test_preflight_incluye_qrencode(monkeypatch):
+    """preflight reporta el binario opcional: se vea antes de necesitarlo."""
+    monkeypatch.setattr(escama.shutil, "which", lambda b: None)
+    comps = escama.preflight()["componentes"]
+    assert "binario qrencode" in comps and comps["binario qrencode"] is False

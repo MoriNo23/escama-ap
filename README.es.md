@@ -57,6 +57,7 @@ sudo escama start         # levanta el AP (hostapd + dnsmasq + NAT + forwarding)
 sudo escama stop          # baja el AP y restaura la interfaz a modo cliente
 sudo escama restart       # stop + start
 sudo escama status        # estado actual (funciona sin sudo)
+escama qr                 # QR para unirte al AP desde el telefono (terminal, sin sudo)
 sudo escama reconnect     # re-levantar tras desenchufar/enchufar el adaptador
 sudo escama genconfig     # regenera hostapd/dnsmasq desde escama.toml
 sudo escama egress        # re-evalúa la salida (VPN/WAN) sin tirar el AP
@@ -163,6 +164,8 @@ testing opcional con `mutmut run` (config en `setup.cfg`).
 - Debian/Linux con NetworkManager (`nmcli`)
 - Python 3.10+ — solo stdlib, cero dependencias
 - `hostapd`, `dnsmasq`, `iw`; `whiptail` solo para la TUI
+- `qrencode` — opcional, solo para `escama qr` (`sudo apt install qrencode`;
+  sin él el comando imprime el string WIFI y la línea de instalación)
 - Un adaptador WiFi con soporte de modo AP (drivers rtl8192eu y aic8800 verificados)
 
 ## Documentación

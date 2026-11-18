@@ -18,6 +18,7 @@ import syslog
 import subprocess
 import time
 import re
+import shutil
 import tomllib
 
 # --- Version ---
@@ -1453,6 +1454,44 @@ def _rename_aplicar(viejo: str, nuevo: str) -> int:
     return 0
 
 
+def _wifi_qr_string(cfg: dict) -> str:
+    """Payload estandar para QR de WiFi (WPA-PSK): WIFI:T:WPA;S:..;P:..;;
+    con escaping de \\ ; , : " (backslash primero, luego el resto)."""
+    def esc(v: str) -> str:
+        v = v.replace("\\", "\\\\")
+        for c in (";", ",", ":", '"'):
+            v = v.replace(c, "\\" + c)
+        return v
+    return ("WIFI:T:WPA;S:" + esc(cfg["SSID"])
+            + ";P:" + esc(cfg["WPA_PASSPHRASE"]) + ";;")
+
+
+def do_qr() -> int:
+    """escama qr — QR de conexion en la terminal para el telefono.
+
+    Solo lectura (como status). Si falta qrencode no muere: imprime el
+    string listo para pegar en un generador web y la linea de instalacion.
+    """
+    cfg = load_env()
+    if not cfg.get("SSID") or not cfg.get("WPA_PASSPHRASE"):
+        print("ERROR: SSID o WPA_PASSPHRASE vacios. Definelos en "
+              f"{CONFIG_FILE}", file=sys.stderr)
+        return 1
+    payload = _wifi_qr_string(cfg)
+    p = run(["qrencode", "-t", "UTF8", payload], capture=True, ro=True)
+    if p is not None and p.returncode == 0 and (p.stdout or "").strip():
+        print(p.stdout, end="")
+        print(f"Escanea para conectar a '{cfg['SSID']}' (WPA2).")
+        return 0
+    # degradado: sin binario (run -> None) o con error, el usuario no queda
+    # bloqueado: el string sirve en cualquier generador web de QR
+    print(f"\nString del QR (pegalo en un generador web si no tenes qrencode):\n"
+          f"  {payload}")
+    print("\nInstala el renderizador local con:\n"
+          "  sudo apt install qrencode", file=sys.stderr)
+    return 1
+
+
 def do_rename(args: list) -> int:
     """escama rename <iface> <nuevo-nombre> — renombre vivo + persistente.
 
@@ -1620,10 +1659,15 @@ def preflight() -> dict:
     comps[f"core {INSTALL_PREFIX}/escama.py"] = os.path.isfile(
         os.path.join(INSTALL_PREFIX, "escama.py"))
     comps["config /etc/escama/escama.toml"] = os.path.isfile(CONFIG_FILE)
+    # opcional: solo lo usa `escama qr`; reportarlo evita descubrirlo tarde.
+    # NO entra en faltan/estado: sin qrencode la instalacion sigue completa
+    # (si contara como faltante dispararia el bootstrap de auto-instalacion).
+    comps["binario qrencode"] = shutil.which("qrencode") is not None
     for u in INSTALL_UNITS:
         comps[f"unit {u}"] = os.path.isfile(os.path.join(INSTALL_UNIT_DIR, u))
 
-    faltan = [k for k, ok in comps.items() if not ok]
+    faltan = [k for k, ok in comps.items() if not ok
+              and k != "binario qrencode"]
     ver_inst = _version_instalada()
     desactualizada = bool(ver_inst) and (ver_inst != VERSION or _codigo_difiere())
 
@@ -1647,7 +1691,8 @@ def do_preflight() -> int:
     p = preflight()
     print("=== escama preflight ===")
     for k, ok in p["componentes"].items():
-        print(f"  [{'ok' if ok else 'FALTA'}] {k}")
+        nota = " (opcional, para `escama qr`)" if k == "binario qrencode" else ""
+        print(f"  [{'ok' if ok else 'FALTA'}] {k}{nota}")
     print(f"Version repo:       {p['version_repo']}")
     print(f"Version instalada:  {p['version_instalada']}")
     print(f"Estado:             {p['estado']}")
@@ -1795,8 +1840,8 @@ def _bootstrap_instalacion() -> bool:
 # --- Gate de privilegio (spec `uso-sin-privilegios`) ---
 # El gate NO es global: las acciones de solo lectura corren sin privilegio y las
 # que mutan el sistema requieren root o el launcher rootless (fase 2 del change).
-ACCIONES_SIN_PRIVILEGIO = ("status", "--help", "-h", "help", "--version", "-v",
-                          "version", "preflight")
+ACCIONES_SIN_PRIVILEGIO = ("status", "qr", "--help", "-h", "help", "--version",
+                           "-v", "version", "preflight")
 ACCIONES_CON_BOOTSTRAP = ("start", "stop", "restart", "reconnect", "genconfig",
                           "egress", "watch")
 
@@ -1841,6 +1886,7 @@ def main(args: list = None) -> int:
         print("  stop       Baja el AP, restaura iface a cliente")
         print("  restart    stop + start")
         print("  status     Estado actual")
+        print("  qr         QR de conexion en la terminal (para el telefono)")
         print("  reconnect  Reconexion manual tras plug/unplug")
         print("  genconfig Regenera hostapd/dnsmasq desde escama.toml")
         print("  egress     Re-evalua la salida (VPN/WAN) sin tirar el AP")
@@ -1853,7 +1899,7 @@ def main(args: list = None) -> int:
         print("  edit       Abre escama.toml en $EDITOR (nvim por defecto)")
         print("  preflight  Estado de la instalacion (solo lectura, sin sudo)")
         print("\nOpciones: --help|-h  --version|-v")
-        print("\nSin sudo: status, preflight, --help y --version.")
+        print("\nSin sudo: status, qr, preflight, --help y --version.")
         print("Con sudo (o rootless): start, stop, restart, reconnect,")
         print("genconfig, egress, watch.")
         return 0
@@ -1871,6 +1917,8 @@ def main(args: list = None) -> int:
         return do_start()
     elif action == "status":
         return do_status()
+    elif action == "qr":
+        return do_qr()
     elif action == "reconnect":
         # manual reconnection: ensure iface present then restart
         cfg = load_env()
