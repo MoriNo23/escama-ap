@@ -43,7 +43,7 @@
 
 | File | Role |
 |------|------|
-| `opt/escama/escama.py` | Core. Actions: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|rename\|preflight` |
+| `opt/escama/escama.py` | Core. Actions: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|rename\|autorename\|preflight` |
 | `opt/escama/escama-tui.py` | whiptail TUI. Edits `escama.toml`, regenerates confs |
 | `opt/escama/escama-launch.c` | Rootless ELF launcher (capabilities → core); compiled to `/opt/escama/escama-launch` |
 | `etc/escama/escama.toml` | **Single source of truth** |
@@ -124,6 +124,17 @@ active NM profile). Syncs `AP_IFACE`/`WAN_IFACE` in `escama.toml` when they
 pointed at the old name. Direct sudo only (the launcher rootless gives network
 capabilities, not file-write in `/etc`). Refuses while the iface is in AP mode.
 
+`autorename` builds on the same machinery (`_rename_aplicar`, the shared live
+sequence): any present WiFi adapter with a kernel-generic name
+(`wlx<MAC>`, `wlanN`, `wlpXsY` — `_nombre_generico`) is renamed to
+`wifi-<last nibbles of its MAC>` (`_nombre_default`: 4 hex, escalating to 6/8/10
+on collision — 12 would break IFNAMSIZ). Deterministic and stateless: stable
+across replugs/boots. Two entry points, one rule: `do_start` auto-renames only
+the AP (`_autorename_ap_si_corresponde`, covers first install, config reset and
+generic `AP_IFACE`); `sudo escama autorename` (`do_autorename`) renames every
+generic WiFi present, WAN included. Custom names are never overwritten and the
+WAN is never renamed automatically (golden rule: WAN read-only).
+
 ## 6. Reconnect after plug/unplug
 
 No auto-reconnect (design decision: manual). If the adapter drops:
@@ -135,7 +146,7 @@ systemd `Restart=on-failure` only covers process death, not missing hardware.
 ## 7. Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 105 tests, mocked, ~22s
+python3 -m pytest tests/test_escama.py -q   # 136 tests, mocked, ~16s
 ~/.local/bin/mutmut run                      # mutation testing (reads setup.cfg)
 ```
 Tests mock `run()`/`subprocess`/`os` → **never touch stonepi or wn8200nd**.

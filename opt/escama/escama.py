@@ -1069,6 +1069,13 @@ def do_start() -> int:
     if not iface_exists(wan):
         log(f"WARN: WAN iface {wan} no existe. El AP no tendra internet saliente.")
 
+    # --- autorename: nombre legible por defecto para el AP (primera vez
+    # tras instalar, config reseteada, o AP_IFACE generico). Los nombres
+    # propios no se tocan; la WAN nunca se renombra automaticamente. ---
+    ap_nuevo = _autorename_ap_si_corresponde(cfg)
+    if ap_nuevo:
+        ap = ap_nuevo
+
     # free iface from NM (AP iface only)
     # Quitarle la iface al gestor de red: sin esto NetworkManager puede
     # reasignarla o pelear por el leasesfile. Es un requisito de autorizacion
@@ -1280,6 +1287,40 @@ def _nombre_valido(nombre: str) -> str:
     return ""
 
 
+def _nombre_generico(nombre: str) -> bool:
+    """True si es un nombre que el kernel/udev asigna solos: wlx<MAC>,
+    wlanN, wlpXsY. Un nombre puesto por el usuario (stonepi, WU900,
+    wifi-usb) no matchea: autorename nunca lo sobreescribe."""
+    return bool(re.fullmatch(r"(wlx[0-9a-f]{12}|wlan[0-9]+|wlp\d+s\d+)",
+                             nombre or ""))
+
+
+def _nombre_default(mac: str, ocupados: set = None) -> str:
+    """Nombre por defecto: wifi-<ultimos 4 hex de la MAC> (ej.
+    02:1a:2b:3c:4d:01 -> wifi-4d01). Deterministico: estable entre replugs
+    y boots, sin archivo de estado. Si ya esta ocupado escala a 6, 8 y 10
+    nibbles (12 no entra en el limite IFNAMSIZ de 15); sin nombre libre
+    devuelve "". MAC malformada: ""."""
+    hexa = (mac or "").replace(":", "").lower()
+    if not re.fullmatch(r"[0-9a-f]{12}", hexa):
+        return ""
+    for n in (4, 6, 8, 10):
+        cand = f"wifi-{hexa[-n:]}"
+        if cand not in (ocupados or set()):
+            return cand
+    return ""
+
+
+def _wifis_presentes() -> list:
+    """Adaptadores WiFi presentes (sysfs), orden fijo para salida
+    deterministica. Sin /sys/class/net: lista vacia."""
+    try:
+        nombres = os.listdir("/sys/class/net")
+    except OSError:
+        return []
+    return sorted(n for n in nombres if iface_wifi(n))
+
+
 def _escribir_regla_udev(mac: str, name: str) -> None:
     """Deja UNA regla por MAC en RENAME_RULES (idempotente).
 
@@ -1344,45 +1385,12 @@ def _perfiles_nm_en(iface: str) -> list:
             if l.rsplit(":", 1)[-1] == iface]
 
 
-def do_rename(args: list) -> int:
-    """escama rename <iface> <nuevo-nombre> — renombre vivo + persistente.
-
-    Lo que antes se hacia a mano (regla udev por MAC + reboot: stonepi,
-    wn8200nd) queda productizado: regla udev idempotente, retiro de la regla
-    manual vieja de la misma MAC, rename en vivo con NM y sincronia del
-    escama.toml. Requiere sudo directo: la regla escribe en /etc y el
-    launcher rootless no da DAC override.
-    """
-    if len(args) != 2:
-        print("Uso: escama rename <iface> <nuevo-nombre>", file=sys.stderr)
-        print("  Ej: sudo escama rename wlx020304050607 wifi-usb",
-              file=sys.stderr)
-        return 2
-    viejo, nuevo = args
-    if os.geteuid() != 0:
-        print("El rename escribe reglas udev en /etc: necesita sudo directo.\n"
-              "  sudo escama rename " + " ".join(args), file=sys.stderr)
-        return 1
-    motivo = _nombre_valido(nuevo)
-    if motivo:
-        log(f"ERROR: nombre invalido ({motivo}).")
-        return 1
-    if not iface_exists(viejo):
-        log(f"ERROR: {viejo} no presente.")
-        return 1
-    if not iface_wifi(viejo):
-        log(f"ERROR: {viejo} no es un adaptador WiFi (sin phy80211).")
-        return 1
-    if viejo == nuevo:
-        log(f"Nada que hacer: {viejo} ya se llama asi.")
-        return 0
-    if iface_exists(nuevo):
-        log(f"ERROR: ya existe una interfaz llamada {nuevo}.")
-        return 1
-    if iface_type_ap(viejo):
-        log("ERROR: la interfaz esta en modo AP. Baja el AP primero "
-            "(sudo escama stop) y renombra despues.")
-        return 1
+def _rename_aplicar(viejo: str, nuevo: str) -> int:
+    """Secuencia viva compartida de renombre (la usan `rename` y
+    `autorename`): regla udev por MAC + retiro de la manual vieja, rename
+    en vivo con NM (down -> rename -> up, rollback si el kernel rechaza),
+    rebind de perfiles NM y sincronia de escama.toml. Requiere root y
+    nombres/colisiones ya validados por el llamador. Devuelve rc."""
     mac = _mac_de(viejo)
     if not mac:
         log(f"ERROR: no pude leer la MAC de {viejo} (sysfs).")
@@ -1432,6 +1440,121 @@ def do_rename(args: list) -> int:
         log("Si ese adaptador es el AP: sudo escama genconfig + restart.")
     log(f"OK: {viejo} ahora es {nuevo} (vivo y persistente).")
     return 0
+
+
+def do_rename(args: list) -> int:
+    """escama rename <iface> <nuevo-nombre> — renombre vivo + persistente.
+
+    Lo que antes se hacia a mano (regla udev por MAC + reboot: stonepi,
+    wn8200nd) queda productizado: regla udev idempotente, retiro de la regla
+    manual vieja de la misma MAC, rename en vivo con NM y sincronia del
+    escama.toml. Requiere sudo directo: la regla escribe en /etc y el
+    launcher rootless no da DAC override.
+    """
+    if len(args) != 2:
+        print("Uso: escama rename <iface> <nuevo-nombre>", file=sys.stderr)
+        print("  Ej: sudo escama rename wlx020304050607 wifi-usb",
+              file=sys.stderr)
+        return 2
+    viejo, nuevo = args
+    if os.geteuid() != 0:
+        print("El rename escribe reglas udev en /etc: necesita sudo directo.\n"
+              "  sudo escama rename " + " ".join(args), file=sys.stderr)
+        return 1
+    motivo = _nombre_valido(nuevo)
+    if motivo:
+        log(f"ERROR: nombre invalido ({motivo}).")
+        return 1
+    if not iface_exists(viejo):
+        log(f"ERROR: {viejo} no presente.")
+        return 1
+    if not iface_wifi(viejo):
+        log(f"ERROR: {viejo} no es un adaptador WiFi (sin phy80211).")
+        return 1
+    if viejo == nuevo:
+        log(f"Nada que hacer: {viejo} ya se llama asi.")
+        return 0
+    if iface_exists(nuevo):
+        log(f"ERROR: ya existe una interfaz llamada {nuevo}.")
+        return 1
+    if iface_type_ap(viejo):
+        log("ERROR: la interfaz esta en modo AP. Baja el AP primero "
+            "(sudo escama stop) y renombra despues.")
+        return 1
+    return _rename_aplicar(viejo, nuevo)
+
+
+def do_autorename(args: list) -> int:
+    """escama autorename — nombres legibles por defecto para WiFi genericas.
+
+    Renombra a wifi-<4 de MAC> todo adaptador WiFi presente que conserve
+    nombre generico del kernel (wlx<MAC>, wlanN, wlpXsY). Incluye la WAN:
+    este comando manual es la puerta de entrada del dongle nuevo. Los
+    nombres que el usuario puso no se tocan. Requiere sudo directo: escribe
+    reglas udev en /etc.
+    """
+    if args:
+        print("Uso: sudo escama autorename", file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        print("El autorename escribe reglas udev en /etc: necesita sudo "
+              "directo.\n  sudo escama autorename", file=sys.stderr)
+        return 1
+    presentes = set(_wifis_presentes())
+    genericas = [n for n in sorted(presentes) if _nombre_generico(n)]
+    if not genericas:
+        log("Nada que hacer: no hay adaptadores WiFi con nombre generico "
+            "(wlx<MAC>, wlanN, wlpXsY).")
+        return 0
+    fallos = 0
+    for viejo in genericas:
+        if iface_type_ap(viejo):
+            log(f"Salto {viejo}: esta en modo AP (sudo escama stop antes).")
+            continue
+        mac = _mac_de(viejo)
+        if not mac:
+            log(f"Salto {viejo}: no pude leer su MAC (sysfs).")
+            continue
+        nuevo = _nombre_default(mac, presentes - {viejo})
+        if not nuevo:
+            log(f"Salto {viejo}: no consegui nombre libre (colision).")
+            continue
+        if _rename_aplicar(viejo, nuevo) == 0:
+            presentes.discard(viejo)
+            presentes.add(nuevo)
+        else:
+            fallos += 1
+    return 1 if fallos else 0
+
+
+def _autorename_ap_si_corresponde(cfg: dict) -> str:
+    """Unico gatillo automatico de autorename (do_start): cubre primera
+    instalacion, config reseteada y AP_IFACE generico. Si el AP resuelto
+    tiene nombre generico lo renombra a wifi-<4 de MAC> y deja el toml
+    apuntando al nombre nuevo. Los nombres personalizados no se tocan y la
+    WAN nunca se renombra automaticamente. Devuelve el nombre nuevo o "".
+    """
+    viejo = (cfg.get("AP_IFACE") or "").strip()
+    if not viejo or not iface_exists(viejo) or not _nombre_generico(viejo):
+        return ""
+    if iface_type_ap(viejo):
+        return ""
+    mac = _mac_de(viejo)
+    if not mac:
+        return ""
+    presentes = set(_wifis_presentes()) - {viejo}
+    nuevo = _nombre_default(mac, presentes)
+    if not nuevo:
+        return ""
+    if _rename_aplicar(viejo, nuevo) != 0:
+        return ""
+    # el sync del helper solo toca el toml si apuntaba al nombre viejo;
+    # si la config no existia (primera vez / reset) la materializamos aqui.
+    cfg["AP_IFACE"] = nuevo
+    save_config(cfg)
+    log(f"Autorename: {viejo} -> {nuevo} (nombre por defecto; cambialo con "
+        "sudo escama rename <iface> <nuevo>).")
+    return nuevo
 
 
 # ---------------------------------------------------------------------------
@@ -1702,7 +1825,7 @@ def main(args: list = None) -> int:
     # global flags
     if action in ("--help", "-h", "help"):
         print(__doc__.strip())
-        print("\nUso: sudo escama {start|stop|restart|status|reconnect|genconfig|egress|watch|edit}")
+        print("\nUso: sudo escama {start|stop|restart|status|reconnect|genconfig|egress|watch|rename|autorename|edit}")
         print("  start      Levanta el AP (hostapd + dnsmasq + masquerade)")
         print("  stop       Baja el AP, restaura iface a cliente")
         print("  restart    stop + start")
@@ -1714,6 +1837,8 @@ def main(args: list = None) -> int:
         print("  watch      Loop que sigue el estado del tunnel y reaplica NAT")
         print("  rename     Renombra un adaptador WiFi (vivo + regla udev por MAC)")
         print("             uso: escama rename <iface> <nuevo-nombre>")
+        print("  autorename Nombres por defecto (wifi-<4 de MAC>) para las WiFi")
+        print("             con nombre generico del kernel; uso: escama autorename")
         print("  edit       Abre escama.toml en $EDITOR (nvim por defecto)")
         print("  preflight  Estado de la instalacion (solo lectura, sin sudo)")
         print("\nOpciones: --help|-h  --version|-v")
@@ -1762,13 +1887,15 @@ def main(args: list = None) -> int:
         return do_preflight()
     elif action == "rename":
         return do_rename(argv[1:])
+    elif action == "autorename":
+        return do_autorename(argv[1:])
     elif action == "edit":
         editor = os.environ.get("EDITOR", "nvim")
         os.execvp(editor, [editor, CONFIG_FILE])
         return 0  # unreachable
     else:
         print(f"Accion desconocida: {action}", file=sys.stderr)
-        print("Uso: sudo escama {start|stop|restart|status|reconnect|genconfig|egress|watch|edit}", file=sys.stderr)
+        print("Uso: sudo escama {start|stop|restart|status|reconnect|genconfig|egress|watch|rename|autorename|edit}", file=sys.stderr)
         return 2
 
 

@@ -43,7 +43,7 @@
 
 | Archivo | Rol |
 |---------|-----|
-| `opt/escama/escama.py` | Núcleo. Acciones: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|rename\|preflight` |
+| `opt/escama/escama.py` | Núcleo. Acciones: `start\|stop\|restart\|status\|reconnect\|genconfig\|egress\|watch\|rename\|autorename\|preflight` |
 | `opt/escama/escama-tui.py` | TUI whiptail. Edita `escama.toml`, regenera confs |
 | `opt/escama/escama-launch.c` | Launcher ELF rootless (capabilities → núcleo); se compila a `/opt/escama/escama-launch` |
 | `etc/escama/escama.toml` | **Única fuente de verdad** |
@@ -127,6 +127,18 @@ el perfil NM activo). Sincroniza `AP_IFACE`/`WAN_IFACE` del `escama.toml` si
 apuntaban al nombre viejo. Solo sudo directo (el launcher rootless da caps de
 red, no escritura en `/etc`). Se niega si la iface está en modo AP.
 
+`autorename` reutiliza la misma maquinaria (`_rename_aplicar`, la secuencia
+viva compartida): todo WiFi presente con nombre genérico del kernel
+(`wlx<MAC>`, `wlanN`, `wlpXsY` — `_nombre_generico`) pasa a
+`wifi-<últimos nibbles de su MAC>` (`_nombre_default`: 4 hex, escalando a
+6/8/10 si colisiona — 12 no entra en IFNAMSIZ). Determinístico y sin estado:
+estable entre replugs y boots. Dos puntos de entrada, una regla: `do_start`
+autorenombra solo el AP (`_autorename_ap_si_corresponde`, cubre primera
+instalación, config reseteada y `AP_IFACE` genérico); `sudo escama autorename`
+(`do_autorename`) renombra todas las WiFi genéricas presentes, WAN incluida.
+Los nombres personalizados nunca se sobreescriben y la WAN nunca se renombra
+automáticamente (regla de oro: WAN read-only).
+
 ## 6. Reconexión tras plug/unplug
 
 Sin auto-reconnect (decisión de diseño: manual). Si el adaptador se cae:
@@ -138,7 +150,7 @@ sudo escama.py reconnect    # igual que restart, para usar tras re-enchufar
 ## 7. Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 105 tests, mockeados, ~22s
+python3 -m pytest tests/test_escama.py -q   # 136 tests, mockeados, ~16s
 ~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
 ```
 Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.

@@ -10,7 +10,7 @@ internet through the WAN or a VPN tunnel, with automatic NAT.
 ![build](https://img.shields.io/github/actions/workflow/status/MoriNo23/escama-ap/ci.yml?branch=master)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
-![tests](https://img.shields.io/badge/tests-124%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-136%20passing-brightgreen)
 ![config](https://img.shields.io/badge/config-TOML-blue)
 ![license](https://img.shields.io/github/license/MoriNo23/escama-ap)
 
@@ -63,6 +63,7 @@ sudo escama egress        # re-evaluate exit path (VPN/WAN) without dropping the
 sudo escama egress vpn    # force exit: auto | vpn | wan | <iface>
 sudo escama watch         # loop: follow the VPN tunnel, re-apply routing
 sudo escama rename <iface> <new>   # rename a WiFi adapter
+sudo escama autorename             # default names (wifi-<4 of MAC>) for generic WiFi
 escama preflight          # machine check (components, version, permissions)
 
 sudo escama-tui           # interactive menu (whiptail) to edit the config
@@ -103,6 +104,14 @@ sudo escama rename wlx020304050607 wifi-usb
 - If that MAC had a manual rule in `70-persistent-net.rules` or similar, it is
   retired and consolidated into `76-escama-ifaces.rules`.
 
+`autorename` skips the typing altogether: any WiFi adapter still carrying a
+kernel-generic name (`wlx<MAC>`, `wlan0`, `wlp3s0`) gets `wifi-<last 4 hex of
+its MAC>` (e.g. `wifi-b48f`; on collision it uses more nibbles). `start` does
+this for the AP automatically on first run — also after a config reset or when
+`AP_IFACE` points at a generic name — and `sudo escama autorename` renames
+every generic WiFi adapter present, WAN included. Custom names are never
+overwritten, and the WAN is only renamed by that manual command.
+
 ## VPN egress
 
 If the host has a VPN running, AP clients exit through the tunnel instead of
@@ -140,7 +149,7 @@ confs land, so "it did not start" is never confused with "I lack permission".
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q    # 124 tests, ~15 s
+python3 -m pytest tests/test_escama.py -q    # 136 tests, ~16 s
 ```
 
 Tests mock `run()`/`subprocess`/`os`: they never touch real interfaces

@@ -2116,3 +2116,196 @@ def test_do_rename_sincroniza_config(monkeypatch, tmp_path):
     antes = toml2.read_text()
     escama.do_rename(["wlx020304050607", "wifi-usb"])
     assert toml2.read_text() == antes, "sin claves afectadas, no reescribe"
+
+
+# ---------------------------------------------------------------------------
+# autorename: nombres por defecto (wifi-<4 de MAC>) para WiFi con nombre
+# generico del kernel. Personalizados no se tocan; WAN nunca se renombra
+# automaticamente (solo por el comando manual).
+# ---------------------------------------------------------------------------
+
+def _autorename_entorno(monkeypatch, tmp_path, wifis=("wlx020304050607",),
+                        macs=None, tipo_ap=(), euid=0, ap_iface="",
+                        wan_iface=""):
+    """Banco de pruebas de autorename: WiFi presentes simuladas, config en
+    tmp_path y secuencia run() capturada."""
+    monkeypatch.setattr(escama.os, "geteuid", lambda: euid)
+    monkeypatch.setattr(escama, "iface_exists",
+                        lambda x: x in set(wifis) | {"otra-ifi"})
+    monkeypatch.setattr(escama, "_wifis_presentes", lambda: sorted(wifis))
+    macs = macs or {w: "02:1a:2b:3c:4d:01" for w in wifis}
+    monkeypatch.setattr(escama, "_mac_de", lambda x: macs.get(x, ""))
+    monkeypatch.setattr(escama, "iface_type_ap", lambda x: x in tipo_ap)
+    monkeypatch.setattr(escama, "RENAME_RULES",
+                        str(tmp_path / "76-escama-ifaces.rules"))
+    monkeypatch.setattr(escama, "RENAME_LEGACY", ())
+    toml = tmp_path / "escama.toml"
+    toml.write_text("# config casera\n"
+                    f'AP_IFACE = "{ap_iface}"\n'
+                    f'WAN_IFACE = "{wan_iface}"\n')
+    monkeypatch.setattr(escama, "CONFIG_FILE", str(toml))
+    monkeypatch.setattr(escama, "load_env", lambda: dict(
+        escama.DEFAULTS, AP_IFACE=ap_iface, WAN_IFACE=wan_iface))
+    calls = []
+    monkeypatch.setattr(escama, "run", lambda c, **k: calls.append(c) or type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    return toml, calls
+
+
+def test_nombre_generico_patrones():
+    """Genericos: wlx<MAC>, wlanN, wlpXsY. Un nombre puesto por el usuario
+    (stonepi, WU900, wifi-b48f) no matchea."""
+    assert escama._nombre_generico("wlx020304050607")
+    assert escama._nombre_generico("wlan0")
+    assert escama._nombre_generico("wlan12")
+    assert escama._nombre_generico("wlp3s0")
+    for nombre in ("stonepi", "wn8200nd", "WU900", "wifi-b48f", "wifi-usb",
+                   "lo", "eth0", "wlan0mon", "wlan_ap", "wlx02030405060"):
+        assert not escama._nombre_generico(nombre), nombre
+
+
+def test_nombre_default_esquema_y_escalada():
+    """wifi-<ultimos 4 hex de la MAC>; si colisiona escala a 6, 8 y 10
+    nibbles (12 no entra en IFNAMSIZ). Sin nombre libre: ""."""
+    mac = "02:1a:2b:3c:4d:01"
+    assert escama._nombre_default(mac) == "wifi-4d01"
+    assert escama._nombre_default(mac, {"wifi-4d01"}) == "wifi-3c4d01"
+    assert escama._nombre_default(
+        mac, {"wifi-4d01", "wifi-3c4d01"}) == "wifi-2b3c4d01"
+    assert escama._nombre_default(
+        mac, {"wifi-4d01", "wifi-3c4d01",
+              "wifi-2b3c4d01"}) == "wifi-1a2b3c4d01"
+    assert escama._nombre_default(
+        mac, {"wifi-4d01", "wifi-3c4d01", "wifi-2b3c4d01",
+              "wifi-1a2b3c4d01"}) == ""
+    assert escama._nombre_default("no-es-una-mac") == ""
+
+
+def test_do_autorename_renomba_y_sincroniza_toml(monkeypatch, tmp_path):
+    """AP_IFACE generica: renombre vivo + regla udev + toml al nombre nuevo."""
+    toml, calls = _autorename_entorno(
+        monkeypatch, tmp_path, ap_iface="wlx020304050607")
+    rc = escama.do_autorename([])
+    assert rc == 0
+    planas = [" ".join(c) for c in calls]
+    assert "ip link set wlx020304050607 name wifi-4d01" in planas
+    assert 'AP_IFACE = "wifi-4d01"' in toml.read_text()
+    reglas = (tmp_path / "76-escama-ifaces.rules").read_text()
+    assert 'ATTR{address}=="02:1a:2b:3c:4d:01"' in reglas
+    assert 'NAME="wifi-4d01"' in reglas
+
+
+def test_do_autorename_idempotente_con_personalizados(monkeypatch, tmp_path):
+    """Solo personalizados presentes: nada que hacer, rc 0, toml intacto."""
+    toml, calls = _autorename_entorno(
+        monkeypatch, tmp_path, wifis=("stonepi",),
+        macs={"stonepi": "02:1a:2b:3c:4d:02"}, ap_iface="stonepi")
+    antes = toml.read_text()
+    assert escama.do_autorename([]) == 0
+    assert not any("ip link set" in " ".join(c) for c in calls)
+    assert toml.read_text() == antes
+
+
+def test_do_autorename_renomba_wan_si_es_manual(monkeypatch, tmp_path):
+    """El comando manual escanea TODAS las WiFi presentes, incluida la WAN
+    generica (el dongle nuevo); el AP personalizado no se toca."""
+    toml, calls = _autorename_entorno(
+        monkeypatch, tmp_path, wifis=("stonepi", "wlx020304050607"),
+        macs={"stonepi": "02:1a:2b:3c:4d:02",
+              "wlx020304050607": "02:1a:2b:3c:4d:01"},
+        ap_iface="stonepi", wan_iface="wlx020304050607")
+    rc = escama.do_autorename([])
+    assert rc == 0
+    planas = [" ".join(c) for c in calls]
+    assert "ip link set wlx020304050607 name wifi-4d01" in planas
+    out = toml.read_text()
+    assert 'WAN_IFACE = "wifi-4d01"' in out
+    assert 'AP_IFACE = "stonepi"' in out, "el AP personalizado queda igual"
+
+
+def test_do_autorename_requiere_root_y_sin_args(monkeypatch, tmp_path):
+    """Sin sudo: rc 1. Con argumentos de mas: rc 2."""
+    _autorename_entorno(monkeypatch, tmp_path, euid=1000)
+    assert escama.do_autorename([]) == 1
+    assert escama.do_autorename(["extra"]) == 2
+
+
+def test_do_autorename_salta_modo_ap(monkeypatch, tmp_path):
+    """Iface generica en modo AP activo: no se renombra en caliente; el
+    resto no falla (rc 0, salto logueado)."""
+    _autorename_entorno(
+        monkeypatch, tmp_path, ap_iface="wlx020304050607",
+        tipo_ap=("wlx020304050607",))
+    assert escama.do_autorename([]) == 0
+
+
+def test_do_autorename_colision_entre_dongles(monkeypatch, tmp_path):
+    """Dos dongles con mismos ultimos 4 hex: nombres distintos (escalada)."""
+    _autorename_entorno(
+        monkeypatch, tmp_path,
+        wifis=("wlx020304050607", "wlx030405060708"),
+        macs={"wlx020304050607": "02:1a:2b:3c:4d:01",
+              "wlx030405060708": "aa:bb:cc:dd:4d:01"})
+    rc = escama.do_autorename([])
+    assert rc == 0
+    reglas = (tmp_path / "76-escama-ifaces.rules").read_text()
+    assert reglas.count('NAME="wifi-4d01"') == 1
+    assert 'NAME="wifi-dd4d01"' in reglas, \
+        "segundo dongle escala a 6 nibbles de SU MAC"
+
+
+def test_hook_start_renombra_ap_generico(monkeypatch, tmp_path):
+    """Gatillo en start: primera vez tras instalar (o config reseteada) el
+    AP generico se renombra, el toml queda apuntando al nombre nuevo."""
+    toml, calls = _autorename_entorno(
+        monkeypatch, tmp_path, ap_iface="wlx020304050607")
+    cfg = escama.load_env()
+    nuevo = escama._autorename_ap_si_corresponde(cfg)
+    assert nuevo == "wifi-4d01"
+    assert cfg["AP_IFACE"] == "wifi-4d01"
+    assert 'AP_IFACE = "wifi-4d01"' in toml.read_text()
+    planas = [" ".join(c) for c in calls]
+    assert "ip link set wlx020304050607 name wifi-4d01" in planas
+
+
+def test_hook_start_no_toca_personalizada(monkeypatch, tmp_path):
+    """AP con nombre propio (stonepi): hook sin efecto, cada start."""
+    toml, calls = _autorename_entorno(
+        monkeypatch, tmp_path, wifis=("stonepi",),
+        macs={"stonepi": "02:1a:2b:3c:4d:02"}, ap_iface="stonepi")
+    cfg = escama.load_env()
+    assert escama._autorename_ap_si_corresponde(cfg) == ""
+    assert toml.read_text().count('AP_IFACE = "stonepi"') == 1
+    assert not any("ip link set" in " ".join(c) for c in calls)
+
+
+def test_hook_start_wan_intacta(monkeypatch, tmp_path):
+    """Regla de oro: el gatillo automatico nunca renombra la WAN generica
+    (solo el AP); el comando manual es el que la cubre."""
+    toml, calls = _autorename_entorno(
+        monkeypatch, tmp_path, wifis=("stonepi", "wlx020304050607"),
+        macs={"stonepi": "02:1a:2b:3c:4d:02",
+              "wlx020304050607": "02:1a:2b:3c:4d:01"},
+        ap_iface="stonepi", wan_iface="wlx020304050607")
+    cfg = escama.load_env()
+    assert escama._autorename_ap_si_corresponde(cfg) == ""
+    assert 'WAN_IFACE = "wlx020304050607"' in toml.read_text()
+    assert not any("name" in " ".join(c) for c in calls)
+
+
+def test_main_despacha_autorename_y_pide_sudo(monkeypatch, tmp_path, capsys):
+    """autorename entra por el gate de privilegio (como rename: no es de
+    solo lectura y no dispara bootstrap) y despacha a do_autorename."""
+    _autorename_entorno(
+        monkeypatch, tmp_path, wifis=("stonepi",),
+        macs={"stonepi": "02:1a:2b:3c:4d:02"}, ap_iface="stonepi")
+    assert escama.main(["autorename"]) == 0
+    _autorename_entorno(
+        monkeypatch, tmp_path, euid=1000, wifis=("wlx020304050607",),
+        ap_iface="wlx020304050607")
+    monkeypatch.setattr(escama, "rootless_disponible",
+                        lambda: (False, "sin launcher"))
+    assert escama.main(["autorename"]) == 1
+    captura = capsys.readouterr()
+    assert "modifica el sistema" in captura.out + captura.err, \
+        "el gate de main avisa antes que el check interno"

@@ -10,7 +10,7 @@ por la WAN o por un túnel VPN, con NAT automático.
 ![build](https://img.shields.io/github/actions/workflow/status/MoriNo23/escama-ap/ci.yml?branch=master)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![plataforma](https://img.shields.io/badge/plataforma-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
-![tests](https://img.shields.io/badge/tests-124%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-136%20passing-brightgreen)
 ![config](https://img.shields.io/badge/config-TOML-blue)
 ![licencia](https://img.shields.io/github/license/MoriNo23/escama-ap)
 
@@ -63,6 +63,7 @@ sudo escama egress        # re-evalúa la salida (VPN/WAN) sin tirar el AP
 sudo escama egress vpn    # forzar salida: auto | vpn | wan | <iface>
 sudo escama watch         # loop: sigue el túnel VPN y reaplica la ruta solo
 sudo escama rename <iface> <nuevo>   # renombra un adaptador WiFi
+sudo escama autorename               # nombres por defecto (wifi-<4 de MAC>) para WiFi genéricas
 escama preflight          # diagnóstico de la máquina (componentes, versión, perms)
 
 sudo escama-tui           # menú interactivo (whiptail) para editar la config
@@ -104,6 +105,15 @@ sudo escama rename wlx020304050607 WU900
 - Si esa MAC tenía una regla manual en `70-persistent-net.rules` o similar,
   la retira y la consolida en `76-escama-ifaces.rules`.
 
+`autorename` evita tipear siquiera una vez: todo adaptador WiFi que conserve
+un nombre genérico del kernel (`wlx<MAC>`, `wlan0`, `wlp3s0`) pasa a
+`wifi-<últimos 4 hex de su MAC>` (ej. `wifi-b48f`; si colisiona usa más
+nibbles). `start` lo hace con el AP automáticamente en la primera vez —
+también tras resetear la config o si `AP_IFACE` apunta a un nombre genérico —
+y `sudo escama autorename` renombra todas las WiFi genéricas presentes, WAN
+incluida. Los nombres personalizados nunca se sobreescriben, y la WAN solo se
+renombra con ese comando manual.
+
 ## Salida por VPN
 
 Si el equipo tiene una VPN activa, los clientes del AP salen por el túnel en
@@ -141,7 +151,7 @@ quedan log y confs, para no confundir "no arrancó" con "no tengo permiso".
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q    # 124 tests, ~15 s
+python3 -m pytest tests/test_escama.py -q    # 136 tests, ~16 s
 ```
 
 Los tests mockean `run()`/`subprocess`/`os`: nunca tocan las interfaces reales

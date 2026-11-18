@@ -9,6 +9,31 @@ declared a version, así que se reconstruyen por épocas a partir de los commits
 del repo. Desde 1.0.0 el bump es explícito: cada change que altera comportamiento
 incluye el bump en su `tasks.md` y una entrada acá.
 
+## 2.2.0 — 2026-11-17
+
+### Agregado
+- **`escama autorename`**: nombres legibles por defecto para adaptadores WiFi
+  con nombre genérico del kernel (`wlx<MAC>`, `wlanN`, `wlpXsY`). Esquema
+  `wifi-<últimos 4 hex de la MAC>` (ej. `wifi-b48f`), determinístico y sin
+  estado (estable entre replugs y boots); si el nombre ya está ocupado escala
+  a 6/8/10 nibbles (12 no entra en IFNAMSIZ). `sudo escama start` renombra el
+  AP automáticamente la primera vez (también tras resetear la config o si
+  `AP_IFACE` apunta a un genérico) via `_autorename_ap_si_corresponde`;
+  `sudo escama autorename` renombra todas las WiFi genéricas presentes, WAN
+  incluida. Los nombres personalizados (stonepi, WU900) nunca se
+  sobreescriben y la WAN nunca se renombra automáticamente (regla de oro:
+  WAN read-only).
+- Refactor: la secuencia viva de `do_rename` (regla udev + retiro legacy +
+  down/rename/up + rebind NM + sync toml) queda en `_rename_aplicar`,
+  compartida por `rename` y `autorename`. Comportamiento de `rename` intacto
+  (9 tests existentes verdes).
+
+### Tests
+- 12 nuevos (136 total): patrones genéricos, esquema y escalada de nombres,
+  renombre con sync de toml, idempotencia, WAN por comando manual, root/args,
+  salto de modo AP, colisión entre dongles, hook de start (renombra/no toca/
+  WAN intacta), dispatch con gate de privilegio.
+
 ## 2.1.0 — 2026-11-17
 
 ### Agregado
