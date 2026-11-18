@@ -513,7 +513,7 @@ def test_detect_wan_iface_detecta_usb_wifi_wlx(monkeypatch):
     def fake_run(cmd, capture=True, **_kw):
         class R:
             returncode = 0
-            stdout = "default via 192.168.101.1 dev wlx020304050607 metric 600\n"
+            stdout = "default via 192.168.1.1 dev wlx020304050607 metric 600\n"
             stderr = ""
 
         return R()
