@@ -1,263 +1,159 @@
+<div align="center">
+
 # escama-ap
 
-Convertidor de interfaz WiFi a Access Point (hostapd + dnsmasq) para Debian/Linux.
-El AP emite el SSID `escama`; el tráfico de los clientes sale por la interfaz WAN
-(modo NAT/masquerade).
+Convierte un adaptador WiFi en Access Point para Debian/Linux.
+Un comando levanta el AP con hostapd + dnsmasq; los clientes salen a internet
+por la WAN o por un túnel VPN, con NAT automático.
 
-> **Regla de diseño:** la interfaz WAN (por defecto `stonepi`) **solo se lee, nunca se
-> modifica** por el software. El AP usa la otra interfaz (por defecto `wn8200nd`).
+![versión](https://img.shields.io/badge/versi%C3%B3n-2.1.0-2ea44f)
+![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![plataforma](https://img.shields.io/badge/plataforma-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
+![tests](https://img.shields.io/badge/tests-124%20passing-brightgreen)
+![config](https://img.shields.io/badge/config-TOML-blue)
 
-## Arquitectura (post-refactor 2026-08-14)
-
-Consolidado de 6 scripts bash sueltos → **1 librería Python + 1 TUI**. Menos ruido,
-única fuente de verdad.
+</div>
 
 ```
-opt/escama/escama.py        # NÚCLEO: start|stop|restart|status|reconnect|genconfig|egress|watch|rename|preflight
-opt/escama/escama-launch.c  # launcher ELF rootless (capabilities → núcleo); se compila a /opt/escama/escama-launch
-opt/escama/escama-tui.py    # TUI (whiptail): edita escama.toml y regenera confs
-etc/escama/escama.toml       # ÚNICA fuente de verdad (AP_IFACE, WAN_IFACE, SSID, etc.)
-etc/hostapd/hostapd-escama.conf    # generado (con root) — sin root: ~/.config/escama/hostapd-escama.conf
-etc/dnsmasq-escama.conf           # generado (con root) — sin root: ~/.config/escama/dnsmasq-escama.conf
-etc/systemd/system/escama-ap.service      # ExecStart=/opt/escama/escama.py start
-etc/systemd/system/escama-egress.service  # watcher VPN: escama.py watch 5
-etc/systemd/user/escama-ap.service        # autostart sin sudo (rootless) al iniciar sesión
-etc/systemd/user/escama-egress.service    # watcher VPN en modo rootless
-tests/test_escama.py        # 124 unit tests (mock de system calls, no toca el sistema)
-setup.cfg                   # config de mutmut (mutation testing)
-install.sh                  # ciclo de vida: install|uninstall|enable|disable|status|enable --user
+ cliente A ┐
+ cliente B ├─ Wi-Fi "escama" ──►  AP (hostapd + dnsmasq)  ── NAT ──► internet
+ cliente C ┘                            │
+                                 ¿hay túnel VPN arriba?
+                                        │ sí            │ no
+                                        ▼               ▼
+                                 salida por el túnel   salida por la WAN
 ```
 
-Instalación y autostart: `sudo ./install.sh install|enable|disable|uninstall` y
-`./install.sh status` — crea los symlinks de `escama`/`escama-tui` en
-`/usr/local/bin/`, instala los units y **nunca pisa tu `escama.toml`** (las
-novedades quedan al lado, en `escama.toml.new`). También instala las user units
-(rootless) sin habilitarlas: eso es `install.sh enable --user`.
+> Regla de diseño: la interfaz WAN **solo se lee, nunca se modifica**. Todo lo
+> que escama configura vive del lado del AP.
 
-## Diseño anti-errores (por qué no se rompe solo)
+## Instalación
 
-1. **Validación real del AP**: `do_start()` comprueba `iw dev <AP> info | grep "type AP"`.
-   No usa el `grep ssid` bogus que antes decía "AP activo" mintiendo.
-2. **WAN dinámico**: el masquerade iptables usa `WAN_IFACE` del env
-   (`-o <WAN_IFACE>`), no hardcodeado a `stonepi`. Si cambiás WAN, el NAT sigue funcionando.
-3. **Auto-detección de WAN**: si `WAN_IFACE=""` en el env, se toma de la ruta default
-   (`ip route show default`). Fallback final: `stonepi` (nunca lo modifica).
-4. **Recarga de módulo en fallo -95**: si el driver 8192eu en memoria no expone modo AP
-   (`iw phy` sin `* AP`), `reload_module_if_needed()` hace `rmmod`+`modprobe` del DKMS
-   (CONFIG_AP_MODE=y) y reintenta. Esto soluciona el "Operation not supported" del hostapd.
-5. **Idempotencia**: `start` mata la instancia previa, valida y solo reporta OK si
-   `type AP` es real. `restart` = `stop` + `start`.
-6. **Egress dinámico VPN/WAN**: el NAT ya no está clavado a la WAN. Si hay un tunnel
-   arriba (ProtonVPN, warp-cli, WireGuard, OpenVPN) los clientes salen **por el tunnel**;
-   si no lo hay, fallback automático a la WAN. Ver [docs-es/VPN-EGRESS.md](docs-es/VPN-EGRESS.md).
-   (Corrige la afirmación vieja de que "WARP + AP no coexisten": sí coexisten, sólo
-   había que mover el masquerade y agregar policy routing.)
-7. **Bug de IP duplicada mitigado**: `do_stop()` y `_ensure_ip()` hacen `ip addr flush`
-   sobre la AP iface, evitando que quede `10.42.1.1/24` pegado en la WAN (que dropeaba
-   las respuestas DNS de los clientes con `ICMP unreachable`).
-8. **Canal sin choque con la WAN**: al `start`, `CHANNEL_MODE=auto` lee el canal de la
-   WAN (solo lectura, `iw dev <wan> link`), elige de `{1, 6, 11}` el canal sin solape
-   (gana el más lejano; empate → menor) y lo loguea. WAN no WiFi legible (ethernet,
-   5 GHz, desconectada) → `CHANNEL` del env. El watcher de VPN solo regenera dnsmasq:
-   **el canal nunca cambia con el AP activo**.
+```bash
+git clone https://github.com/MoriNo23/escama-ap.git
+cd escama-ap
+sudo ./install.sh install    # código en /opt/escama, comandos escama/escama-tui, units
+sudo ./install.sh enable     # opcional: arranque al boot
+```
+
+El instalador nunca pisa tu configuración: si `/etc/escama/escama.toml` ya
+existe, las novedades de cada versión quedan al lado en `escama.toml.new`.
+
+Antes del primer arranque hay que definir la passphrase del AP (escama no
+levanta una red abierta):
+
+```bash
+sudo escama-tui          # opción 7 (Passphrase WPA2), Guardar y Salir
+```
 
 ## Uso
 
 ```bash
-sudo escama.py status        # estado actual
-sudo escama.py start         # levanta el AP (hostapd + dnsmasq + masq + forward)
-sudo escama.py stop          # baja el AP, restaura iface a cliente (NM managed)
-sudo escama.py restart       # stop + start
-sudo escama.py reconnect     # igual que restart pero para reconexión manual tras plug/unplug
-sudo escama.py genconfig     # regenera hostapd/dnsmasq confs desde escama.toml
-sudo escama.py egress        # re-evalua salida VPN/WAN sin tirar el AP
-sudo escama.py egress vpn    # forzar salida por tunnel (auto|vpn|wan|<iface>)
-sudo escama.py watch         # loop: sigue el tunnel y reaplica NAT solo
-sudo escama.py rename wlanX nuevo-nombre  # renombra adaptador WiFi (vivo + udev por MAC)
-escama preflight             # comprueba la maquina (componentes, version, rootless viable)
+sudo escama start         # levanta el AP (hostapd + dnsmasq + NAT + forwarding)
+sudo escama stop          # baja el AP y restaura la interfaz a modo cliente
+sudo escama restart       # stop + start
+sudo escama status        # estado actual (funciona sin sudo)
+sudo escama reconnect     # re-levantar tras desenchufar/enchufar el adaptador
+sudo escama genconfig     # regenera hostapd/dnsmasq desde escama.toml
+sudo escama egress        # re-evalúa la salida (VPN/WAN) sin tirar el AP
+sudo escama egress vpn    # forzar salida: auto | vpn | wan | <iface>
+sudo escama watch         # loop: sigue el túnel VPN y reaplica la ruta solo
+sudo escama rename <iface> <nuevo>   # renombra un adaptador WiFi
+escama preflight          # diagnóstico de la máquina (componentes, versión, perms)
 
-sudo escama-tui              # menú interactivo (whiptail) para editar escama.toml
+sudo escama-tui           # menú interactivo (whiptail) para editar la config
 ```
 
-## Versionado
+## Configuración
 
-`VERSION` (en la raíz del repo) es la **única fuente de la versión**: la leen en
-runtime `escama.py`, `escama-tui.py` e `install.sh`. No está hardcodeada en ningún
-ejecutable. El historial completo está en [`CHANGELOG.md`](CHANGELOG.md).
+Todo vive en `/etc/escama/escama.toml` (TOML, comentarios incluidos). Se edita
+con `escama-tui` o a mano, y los cambios aplican con `sudo escama restart`.
+
+```toml
+AP_IFACE  = "stonepi"     # la interfaz que hace de AP
+WAN_IFACE = "wn8200nd"    # la que trae internet ("" = auto-detectar)
+SSID      = "escama"
+CHANNEL_MODE = "auto"     # auto = elige de {1,6,11} sin solapar la WAN
+EGRESS_MODE  = "auto"     # auto = VPN si hay túnel, si no WAN
+                          # vpn  = kill-switch (sin túnel no navegan)
+                          # wan  = siempre WAN, ignora la VPN
+```
+
+Para invertir los roles (usar la WAN actual como AP) alcanza con intercambiar
+`AP_IFACE` y `WAN_IFACE`: el NAT y las validaciones siguen la config, no hay
+nada hardcodeado.
+
+## Renombrar adaptadores
+
+Los dongles USB aparecen como `wlx<MAC>` (imposible de memorizar). `rename`
+deja una regla udev por MAC y renombra la interfaz al instante:
 
 ```bash
-escama.py --version      # o -v / version
+sudo escama rename wlx020304050607 WU900
 ```
 
-## Preflight
+- Persistente (sobrevive a boots y re-plugs) y en vivo: baja la interfaz,
+  la renombra y la vuelve a subir.
+- Revincula los perfiles de NetworkManager atados al nombre viejo, así que la
+  conexión WiFi actual no se corta.
+- Actualiza `AP_IFACE`/`WAN_IFACE` del toml si apuntaban al nombre viejo.
+- Si esa MAC tenía una regla manual en `70-persistent-net.rules` o similar,
+  la retira y la consolida en `76-escama-ifaces.rules`.
 
-`escama preflight` comprueba **antes de operar** que la máquina tiene lo necesario:
-componentes del sistema, versión del repo frente a la instalada en `/opt/escama`, y
-si el modo rootless es viable. No toca nada.
+## Salida por VPN
+
+Si el equipo tiene una VPN activa, los clientes del AP salen por el túnel en
+vez de quedar fuera de internet. Soporta ProtonVPN, WARP, WireGuard y OpenVPN
+(detección automática o forzada), con policy routing y MSS clamp según el
+túnel. Detalle por proveedor: [docs-es/VPN-EGRESS.md](docs-es/VPN-EGRESS.md).
+
+## Arranque automático (systemd)
 
 ```bash
-escama preflight        # sin sudo
-sudo escama.py preflight
+sudo ./install.sh enable          # al boot + ahora
+sudo ./install.sh disable         # no al boot + detener
+sudo ./install.sh enable --user   # al iniciar sesión, sin unit de sistema
 ```
 
-## Rootless vs sudo: dos modos, mismo núcleo
+`Restart=on-failure` cubre muerte del proceso, no hardware ausente: si el
+adaptador se desenchufa, `sudo escama reconnect` a mano.
 
-**Modo con privilegio** (el histórico): `sudo escama.py start`. Todo pasa por root.
+## Sin sudo (opcional)
 
-**Modo rootless** (sin sudo): el launcher `/opt/escama/escama-launch` es un binario
-ELF con `CAP_NET_ADMIN`, `CAP_NET_RAW` y `CAP_NET_BIND_SERVICE`, y se las pasa al
-Python. Hace falta un ELF porque **el kernel ignora las file capabilities en scripts
-con shebang**. Solo cubre operaciones de red: escribir en `/etc` sigue necesitando
-privilegio, y lo que no puede hacer rootless **degrada con un mensaje explícito**
-(recargar el módulo del driver necesita `CAP_SYS_MODULE`; quitarle la interfaz a
-NetworkManager necesita autorización de NM).
+Además del modo clásico con `sudo`, existe un modo rootless: un binario ELF
+con `CAP_NET_ADMIN`/`RAW`/`BIND_SERVICE` le pasa las capabilities al núcleo
+Python (el kernel ignora file capabilities en scripts con shebang). Cubre las
+operaciones de red; lo que necesita escribir en `/etc` degrada con un mensaje
+explícito. `escama status` muestra siempre qué modo está corriendo y dónde
+quedan log y confs, para no confundir "no arrancó" con "no tengo permiso".
 
-| | con sudo | rootless |
-|---|---|---|
-| Red (hostapd, NAT, rutas, sysctl) | ✅ | ✅ vía el launcher |
-| Autostart | unit de sistema | unit de usuario |
-| Log | `/var/log/escama-ap.log` | `~/.local/state/escama/escama-ap.log` |
-| Confs generados | `/etc/{hostapd,dnsmasq}…` | `~/.config/escama/` |
-| Recargar módulo del driver | ✅ | ❌ degrada con motivo |
-
-`status` muestra siempre el modo y las rutas efectivas, para no confundir "no
-arrancó" con "no tengo permiso".
-
-## systemd
-
-```bash
-sudo ./install.sh enable      # arranca al boot + ahora (escama-ap + escama-egress)
-sudo ./install.sh disable      # NO arranca al boot + detiene ahora
-sudo ./install.sh status      # estado por componente (units, symlinks, env)
-```
-
-### Unit de usuario (autostart sin sudo)
-
-Arranca el AP **al iniciar sesión**, sin privileged unit de sistema:
-
-```bash
-sudo ./install.sh enable --user     # instala y habilita las user units
-sudo ./install.sh disable --user    # y para deshabilitarlas
-```
-
-Se instalan en `~/.config/systemd/user/`. `enable --user` **verifica el modo rootless
-antes de habilitar**: si no verifica, no deja un unit que falla al iniciar sesión.
-Ambos modos pueden convivir, pero solo uno debe estar habilitado a la vez.
-
-```bash
-systemctl --user status escama-ap.service
-journalctl --user -u escama-ap.service -f
-```
-Equivale a `systemctl enable/disable --now` sobre los units instalados, con
-tolerancia a los que falten en esa máquina.
-
-`Restart=on-failure` reinicia el service si el proceso muere (no por fallo de hardware:
-si el adaptador se desenchufa, hay que correr `sudo escama.py reconnect` a mano).
-
-## Migrar AP ↔ WAN (ej. usar stonepi como AP)
-
-Editar `/etc/escama/escama.toml`:
-
-```ini
-AP_IFACE="stonepi"
-WAN_IFACE="wn8200nd"
-```
-Luego: `sudo escama.py restart`.
-
-El masquerade y las validaciones usan estos valores; no hay hardcodeos que rompan el cambio.
-(NOTA: hoy stonepi da internet al equipo y al TV vía NAT; invertirlo requiere que
-wn8200nd sea cliente con internet.)
-
-## Renombrar adaptadores (udev por MAC)
-
-Lo que antes era manual (regla udev a mano + reboot: `stonepi`, `wn8200nd`, que
-antes se llamaban `wlx<MAC>`), ahora lo hace escama:
-
-```bash
-sudo escama rename wlx020304050607 wifi-usb
-```
-
-- Solo adaptadores WiFi (sysfs `phy80211`). Nombre: ≤15 caracteres, letras/dígitos/`-`/`_`, sin empezar con dígito.
-- Deja UNA regla por MAC en `/etc/udev/rules.d/76-escama-ifaces.rules` (idempotente) y **retira** la regla manual vieja de esa misma MAC de `70-persistent-net.rules` / `99-stonepi-ap.rules`.
-- Renombra en vivo: `nmcli managed no` → down → `ip link set name` → up → `managed yes`, y revincula el perfil NM activo del nombre viejo.
-- Sincroniza `AP_IFACE`/`WAN_IFACE` del `escama.toml` si apuntaban al nombre viejo (comentarios intactos).
-- Requiere sudo directo (la regla udev escribe en `/etc`; el launcher rootless no da permisos de escritura). Si la iface está en modo AP: `sudo escama stop` primero.
-
-## Canal del AP (no chocar con la WAN)
-
-```ini
-# /etc/escama/escama.toml
-CHANNEL_MODE="auto"    # auto = al start elige de {1,6,11} sin solape con la WAN
-                       # manual = usa CHANNEL tal cual (comportamiento clásico)
-CHANNEL="6"            # fallback si la WAN no es WiFi legible (o en modo manual)
-```
-
-La detección lee la WAN sin modificarla (`iw dev <wan> link`); el canal elegido
-y su motivo quedan en el log (`/var/log/escama-ap.log`).
+|                             | con sudo              | rootless            |
+|-----------------------------|-----------------------|---------------------|
+| Red (hostapd, NAT, rutas)   | sí                    | sí, vía el launcher |
+| Autostart                   | unit de sistema       | unit de usuario     |
+| Log                         | `/var/log/escama-ap.log` | `~/.local/state/escama/` |
+| Recargar módulo del driver  | sí                    | degrada con motivo  |
 
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 124 tests (SIEMPRE el path explícito)
-~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
+python3 -m pytest tests/test_escama.py -q    # 124 tests, ~15 s
 ```
-NO corras `python3 -m pytest` sin el path: `mutants/tests/` tiene el mismo
-basename y rompe la colección (pitfall documentado en AGENTS.md).
-Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.
-No es un dicho: un fixture `autouse` bloquea `subprocess` durante toda la suite,
-así que un test que se filtre falla con el comando que intentó ejecutar.
 
-### Mutation testing (mutmut)
-
-| Suite (evolución) | Tests | Mutantes | Killed / survived |
-|---|---|---|---|
-| 1ª — inicial (reveló `do_stop`, `do_status`, `wan_has_internet`, `main` sin cubrir) | 9 | 772 | ~19% killed |
-| 2ª | 15 | 775 | 264 / 158 ≈ 62.6% |
-| 3ª — `log()`/`load_env()` + fix de dir-creación | 19 | 783 | 279 / 158 ≈ 63.8% |
-| 4ª — selección de canal + split de generación de confs | 45 | 2170 | 676 / 1136 ≈ 37.3% de los testeados |
-| 5ª — arranque sin fricción: preflight, rootless, rutas XDG, versionado | 105 | 2846 | 1076 / 1417 ≈ 43.1% de los testeados (352 sin tests, 1 timeout) |
-
-- La 4ª corrida usa la base de conteo actual de mutmut 3.7 (2170 mutantes vs 783 de
-  la 3ª): no comparable en valor absoluto con las filas anteriores.
-- La 5ª se re-corrió secuencialmente (`--max-children 1`) sobre los 260 no-killed
-  relevantes (248 del código nuevo + 12 de control): resultados idénticos → la
-  corrida paralela no produjo artefactos. Los no-killed del código nuevo quedaron
-  documentados por categoría (strings de display, fallbacks XDG sin test,
-  equivalentes prácticos, sonda rootless que ejecuta operaciones reales por diseño)
-  en el change `arranque-sin-friccion`.
-- Survived del feature nuevo (selección de canal): **equivalentes** — guardas
-  redundantes re-rankeadas por `max()`, defaults que `load_env()` siempre mergea, y
-  boundary `run()` (mockeado por diseño). Los mutantes significativos (umbral de
-  distancia, desempate, parseo de freq, fallback, modo manual) mueren con la tabla
-  de tests.
-- ~357 untested: mutantes en funciones sin tests mapeados (`main`, `_prompt_iface`,
-  caminos de `do_watch`) — condición preexistente.
-- Supervivientes restantes: en `load_env()` (parsing de .env, ramas no ejercitadas por
-  los inputs de test) y `log()` (formato de string). `run()` es el boundary mockeado.
-- Conclusión: TODA la lógica anti-errores crítica está cubierta. No se persiguió 80%
-  por diminishing returns (tests quirúrgicos por cada rama de parsing de un .env trivial).
+Los tests mockean `run()`/`subprocess`/`os`: nunca tocan las interfaces reales
+(lo garantiza un fixture que bloquea subprocess en toda la suite). Mutation
+testing opcional con `mutmut run` (config en `setup.cfg`).
 
 ## Requisitos
 
-- Python 3.10+
-- `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
-- Driver RTL8192EU compilado con `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` en este equipo)
-- `whiptail` solo para la TUI
+- Debian/Linux con NetworkManager (`nmcli`)
+- Python 3.10+ — solo stdlib, cero dependencias
+- `hostapd`, `dnsmasq`, `iw`; `whiptail` solo para la TUI
+- Un adaptador WiFi con soporte de modo AP (drivers rtl8192eu y aic8800 verificados)
 
-## Salida por VPN (ProtonVPN / WARP / WireGuard)
+## Documentación
 
-Si usás una VPN en este equipo, los clientes del AP **no** se quedan sin internet:
-escama detecta el tunnel y mueve el NAT ahí.
-
-```ini
-# /etc/escama/escama.toml
-EGRESS_MODE="auto"    # auto = VPN si hay tunnel, si no WAN (fallback)
-                      # vpn  = solo VPN (kill-switch, sin tunnel no navegan)
-                      # wan  = siempre WAN (ignora la VPN)
-VPN_IFACE=""          # vacio = auto-detecta proton0/CloudflareWARP/wg0/tun0/...
-VPN_FORCE_ROUTE="yes" # policy routing tabla 51821 (imprescindible con warp-cli)
-VPN_MSS_CLAMP="yes"   # clamp MSS a la MTU del tunnel (WARP=1280, Proton wg=1420)
-VPN_DNS1="10.2.0.1"   # DNS dentro del tunnel (Proton). WARP: 1.1.1.1
-```
-
-Detalle completo, casos por proveedor y diagnóstico: **[docs-es/VPN-EGRESS.md](docs-es/VPN-EGRESS.md)**.
+- [docs/TECHNICAL.md](docs/TECHNICAL.md) — diseño interno (inglés)
+- [docs-es/TECHNICAL.md](docs-es/TECHNICAL.md) — diseño interno (español)
+- [docs-es/VPN-EGRESS.md](docs-es/VPN-EGRESS.md) — salida por túnel, casos y diagnóstico
+- [CHANGELOG.md](CHANGELOG.md) — historial de versiones
