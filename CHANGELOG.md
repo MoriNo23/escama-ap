@@ -1,3 +1,14 @@
+## 2.2.1 — 2026-11-17
+
+### Corregido
+- **`escama egress` ya no aplica NAT a ifaces ausentes**: si `WAN_IFACE` de la
+  config apunta a un dongle desenchufado, `_egress_valido()` re-detecta la WAN
+  real (mismo criterio que `do_start`: el env explícito gana solo si la iface
+  existe) y, si el egress elegido no existe, falla cerrado con aviso explícito
+  en vez de aplicar MASQUERADE a la iface muerta anunciando éxito. Caso real:
+  `start` detectó WU900, la config seguía con `wn8200nd` ausente, y
+  `escama egress` rompía el egress correcto. Mismo fix en `escama watch`.
+
 # Changelog
 
 Todas las versiones de escama-ap. La versión vive en el archivo `VERSION` de la
