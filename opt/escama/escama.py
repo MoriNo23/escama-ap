@@ -1334,9 +1334,10 @@ def _retirar_reglas_legacy(mac: str) -> list:
 
 
 def _perfiles_nm_en(iface: str) -> list:
-    """Perfiles NM activos atados a esa iface (antes del rename)."""
-    p = run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show",
-             "--active"], ro=True)
+    """Perfiles NM atados a esa iface (TODOS, no solo activos: un perfil
+    inactivo con interface-name viejo no reconectaria tras el rename)."""
+    p = run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show"],
+            ro=True)
     if p is None or p.returncode != 0:
         return []
     return [l.rsplit(":", 1)[0] for l in p.stdout.splitlines()
