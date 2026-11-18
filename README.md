@@ -6,12 +6,13 @@ Turns a WiFi adapter into an Access Point on Debian/Linux.
 One command brings up the AP (hostapd + dnsmasq); connected clients reach the
 internet through the WAN or a VPN tunnel, with automatic NAT.
 
-![version](https://img.shields.io/badge/version-2.1.0-2ea44f)
+![release](https://img.shields.io/github/v/release/MoriNo23/escama-ap)
+![build](https://img.shields.io/github/actions/workflow/status/MoriNo23/escama-ap/ci.yml?branch=master)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
 ![tests](https://img.shields.io/badge/tests-124%20passing-brightgreen)
 ![config](https://img.shields.io/badge/config-TOML-blue)
-![license](https://img.shields.io/badge/license-MIT-green)
+![license](https://img.shields.io/github/license/MoriNo23/escama-ap)
 
 [Readme en español](README.es.md)
 
