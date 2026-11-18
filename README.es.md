@@ -10,7 +10,7 @@ por la WAN o por un túnel VPN, con NAT automático.
 ![build](https://img.shields.io/github/actions/workflow/status/MoriNo23/escama-ap/ci.yml?branch=master)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![plataforma](https://img.shields.io/badge/plataforma-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
-![tests](https://img.shields.io/badge/tests-136%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-139%20passing-brightgreen)
 ![config](https://img.shields.io/badge/config-TOML-blue)
 ![licencia](https://img.shields.io/github/license/MoriNo23/escama-ap)
 
@@ -151,7 +151,7 @@ quedan log y confs, para no confundir "no arrancó" con "no tengo permiso".
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q    # 136 tests, ~16 s
+python3 -m pytest tests/test_escama.py -q    # 139 tests, ~16 s
 ```
 
 Los tests mockean `run()`/`subprocess`/`os`: nunca tocan las interfaces reales

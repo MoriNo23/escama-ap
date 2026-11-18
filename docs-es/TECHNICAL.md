@@ -150,7 +150,7 @@ sudo escama.py reconnect    # igual que restart, para usar tras re-enchufar
 ## 7. Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 136 tests, mockeados, ~16s
+python3 -m pytest tests/test_escama.py -q   # 139 tests, mockeados, ~16s
 ~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
 ```
 Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.

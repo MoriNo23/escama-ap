@@ -10,7 +10,7 @@ internet through the WAN or a VPN tunnel, with automatic NAT.
 ![build](https://img.shields.io/github/actions/workflow/status/MoriNo23/escama-ap/ci.yml?branch=master)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
-![tests](https://img.shields.io/badge/tests-136%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-139%20passing-brightgreen)
 ![config](https://img.shields.io/badge/config-TOML-blue)
 ![license](https://img.shields.io/github/license/MoriNo23/escama-ap)
 
@@ -149,7 +149,7 @@ confs land, so "it did not start" is never confused with "I lack permission".
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q    # 136 tests, ~16 s
+python3 -m pytest tests/test_escama.py -q    # 139 tests, ~16 s
 ```
 
 Tests mock `run()`/`subprocess`/`os`: they never touch real interfaces

@@ -893,6 +893,8 @@ def test_do_egress_no_reescribe_hostapd(monkeypatch, tmp_path):
     monkeypatch.setattr(escama, "load_env", lambda: dict(
         escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
         CHANNEL="1"))
+    monkeypatch.setattr(escama, "iface_exists",
+                        lambda x: x in ("stonepi", "proton0"))
     monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "proton0")
     monkeypatch.setattr(escama, "apply_egress", lambda c, e, k: None)
     monkeypatch.setattr(escama, "run", lambda *a, **k: type(
@@ -901,6 +903,59 @@ def test_do_egress_no_reescribe_hostapd(monkeypatch, tmp_path):
     assert rc == 0
     assert ha.read_text() == "channel=1\n"
     assert (tmp_path / "dnsmasq.conf").exists()
+
+
+def _egress_banco(monkeypatch, tmp_path, wan_cfg, existe, detectada):
+    """Banco de egress: config con WAN_IFACE=wan_cfg, sysfs simulado con
+    `existe`, deteccion de WAN que devuelve `detectada`. Devuelve la lista
+    de (egress, kind) aplicados."""
+    monkeypatch.setattr(escama, "HOSTAPD_CONF", str(tmp_path / "hostapd.conf"))
+    monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    monkeypatch.setattr(escama, "load_env", lambda: dict(
+        escama.DEFAULTS, AP_IFACE="stonepi", WAN_IFACE=wan_cfg))
+    monkeypatch.setattr(escama, "iface_exists", lambda x: x in existe)
+    monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "")
+    monkeypatch.setattr(escama, "detect_wan_iface", lambda c: detectada)
+    aplicado = []
+    monkeypatch.setattr(escama, "apply_egress",
+                        lambda c, e, k: aplicado.append((e, k)))
+    monkeypatch.setattr(escama, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    return aplicado
+
+
+def test_do_egress_detecta_wan_si_la_configurada_no_existe(monkeypatch, tmp_path):
+    """WAN_IFACE apunta a un dongle desenchufado: egress detecta la WAN real
+    (mismo criterio que do_start) en vez de aplicar NAT a la iface muerta.
+    Caso real: start detecto WU900, config seguia con wn8200nd ausente."""
+    aplicado = _egress_banco(
+        monkeypatch, tmp_path, wan_cfg="wn8200nd",
+        existe=("stonepi", "WU900"), detectada="WU900")
+    rc = escama.do_egress([])
+    assert rc == 0
+    assert aplicado == [("WU900", "wan")], "aplica la WAN detectada, no la muerta"
+
+
+def test_do_egress_no_aplica_a_iface_muerta(monkeypatch, tmp_path):
+    """WAN configurada ausente y deteccion vacia: fail-closed (flush), rc 1;
+    nunca aplica NAT a una iface que no existe."""
+    aplicado = _egress_banco(
+        monkeypatch, tmp_path, wan_cfg="wn8200nd",
+        existe=("stonepi",), detectada="")
+    rc = escama.do_egress([])
+    assert rc == 1
+    assert aplicado == [("", "none")], "fail-closed, sin reglas a iface muerta"
+
+
+def test_do_egress_wan_configurada_existente_se_respeta(monkeypatch, tmp_path):
+    """WAN_IFACE existe: el env gana, no hay re-deteccion (sin sorpresas)."""
+    aplicado = _egress_banco(
+        monkeypatch, tmp_path, wan_cfg="wn8200nd",
+        existe=("stonepi", "wn8200nd"), detectada="otra")
+    rc = escama.do_egress([])
+    assert rc == 0
+    assert aplicado == [("wn8200nd", "wan")], "env explicito y existente gana"
 
 
 # ---------------------------------------------------------------------------

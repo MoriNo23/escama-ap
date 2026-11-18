@@ -1203,6 +1203,21 @@ def do_status() -> int:
     return 0
 
 
+def _egress_valido(cfg: dict) -> tuple:
+    """Fallback de WAN si la config apunta a una iface ausente (mismo criterio
+    que do_start: el env explicito gana SOLO si la iface existe) y gate de
+    existencia sobre el egress elegido: nunca aplicar NAT a una iface muerta
+    (que simularia exito y dejaria a los clientes sin internet).
+    Devuelve (egress, kind) ya validados; sin salida valida: ("", "none")."""
+    if not cfg.get("WAN_IFACE") or not iface_exists(cfg["WAN_IFACE"]):
+        cfg["WAN_IFACE"] = detect_wan_iface(cfg) or ""
+    egress, kind = resolve_egress(cfg)
+    if egress and not iface_exists(egress):
+        log(f"WARN: {egress} no presente: clientes SIN internet (fail-closed)")
+        egress, kind = "", "none"
+    return egress, kind
+
+
 def do_egress(args: list = None) -> int:
     """Re-evaluate egress and re-apply NAT rules WITHOUT dropping the AP.
 
@@ -1219,9 +1234,7 @@ def do_egress(args: list = None) -> int:
         else:
             cfg["EGRESS_MODE"] = "vpn"
             cfg["VPN_IFACE"] = args[0].strip()
-    if not cfg.get("WAN_IFACE"):
-        cfg["WAN_IFACE"] = detect_wan_iface(cfg)
-    egress, kind = resolve_egress(cfg)
+    egress, kind = _egress_valido(cfg)
     apply_egress(cfg, egress, kind)
     # DNS/MTU de los clientes cambian con el tunnel -> regenerar SOLO dnsmasq.
     # hostapd no se toca: el canal del AP debe quedar estable en vivo.
@@ -1238,9 +1251,7 @@ def do_watch(interval: int = 5) -> int:
     last = None
     while True:
         cfg = load_env()
-        if not cfg.get("WAN_IFACE"):
-            cfg["WAN_IFACE"] = detect_wan_iface(cfg)
-        egress, kind = resolve_egress(cfg)
+        egress, kind = _egress_valido(cfg)
         if (egress, kind) != last:
             log(f"watch: cambio de salida -> {egress or '(ninguna)'} ({kind})")
             apply_egress(cfg, egress, kind)

@@ -146,7 +146,7 @@ systemd `Restart=on-failure` only covers process death, not missing hardware.
 ## 7. Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 136 tests, mocked, ~16s
+python3 -m pytest tests/test_escama.py -q   # 139 tests, mocked, ~16s
 ~/.local/bin/mutmut run                      # mutation testing (reads setup.cfg)
 ```
 Tests mock `run()`/`subprocess`/`os` → **never touch stonepi or wn8200nd**.
