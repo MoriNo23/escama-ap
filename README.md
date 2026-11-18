@@ -2,137 +2,139 @@
 
 # escama-ap
 
-Convierte un adaptador WiFi en Access Point para Debian/Linux.
-Un comando levanta el AP con hostapd + dnsmasq; los clientes salen a internet
-por la WAN o por un túnel VPN, con NAT automático.
+Turns a WiFi adapter into an Access Point on Debian/Linux.
+One command brings up the AP (hostapd + dnsmasq); connected clients reach the
+internet through the WAN or a VPN tunnel, with automatic NAT.
 
-![versión](https://img.shields.io/badge/versi%C3%B3n-2.1.0-2ea44f)
+![version](https://img.shields.io/badge/version-2.1.0-2ea44f)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
-![plataforma](https://img.shields.io/badge/plataforma-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
+![platform](https://img.shields.io/badge/platform-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
 ![tests](https://img.shields.io/badge/tests-124%20passing-brightgreen)
 ![config](https://img.shields.io/badge/config-TOML-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+
+[Readme en español](README.es.md)
 
 </div>
 
 ```
- cliente A ┐
- cliente B ├─ Wi-Fi "escama" ──►  AP (hostapd + dnsmasq)  ── NAT ──► internet
- cliente C ┘                            │
-                                 ¿hay túnel VPN arriba?
-                                        │ sí            │ no
-                                        ▼               ▼
-                                 salida por el túnel   salida por la WAN
+ client A ┐
+ client B ├─ Wi-Fi "escama" ──►  AP (hostapd + dnsmasq)  ── NAT ──► internet
+ client C ┘                            │
+                              is a VPN tunnel up?
+                                        │ yes          │ no
+                                        ▼              ▼
+                                  exit via tunnel   exit via WAN
 ```
 
-> Regla de diseño: la interfaz WAN **solo se lee, nunca se modifica**. Todo lo
-> que escama configura vive del lado del AP.
+> Design rule: the WAN interface is **read-only** for escama. Everything it
+> configures lives on the AP side.
 
-## Instalación
+## Install
 
 ```bash
 git clone https://github.com/MoriNo23/escama-ap.git
 cd escama-ap
-sudo ./install.sh install    # código en /opt/escama, comandos escama/escama-tui, units
-sudo ./install.sh enable     # opcional: arranque al boot
+sudo ./install.sh install    # code in /opt/escama, escama/escama-tui commands, units
+sudo ./install.sh enable     # optional: start at boot
 ```
 
-El instalador nunca pisa tu configuración: si `/etc/escama/escama.toml` ya
-existe, las novedades de cada versión quedan al lado en `escama.toml.new`.
+The installer never overwrites your configuration: if `/etc/escama/escama.toml`
+already exists, new defaults land next to it in `escama.toml.new`.
 
-Antes del primer arranque hay que definir la passphrase del AP (escama no
-levanta una red abierta):
+Before the first start you must set the AP passphrase (escama refuses to run
+an open network):
 
 ```bash
-sudo escama-tui          # opción 7 (Passphrase WPA2), Guardar y Salir
+sudo escama-tui          # option 7 (WPA2 passphrase), Save and Exit
 ```
 
-## Uso
+## Usage
 
 ```bash
-sudo escama start         # levanta el AP (hostapd + dnsmasq + NAT + forwarding)
-sudo escama stop          # baja el AP y restaura la interfaz a modo cliente
+sudo escama start         # bring the AP up (hostapd + dnsmasq + NAT + forwarding)
+sudo escama stop          # take it down, restore the interface to client mode
 sudo escama restart       # stop + start
-sudo escama status        # estado actual (funciona sin sudo)
-sudo escama reconnect     # re-levantar tras desenchufar/enchufar el adaptador
-sudo escama genconfig     # regenera hostapd/dnsmasq desde escama.toml
-sudo escama egress        # re-evalúa la salida (VPN/WAN) sin tirar el AP
-sudo escama egress vpn    # forzar salida: auto | vpn | wan | <iface>
-sudo escama watch         # loop: sigue el túnel VPN y reaplica la ruta solo
-sudo escama rename <iface> <nuevo>   # renombra un adaptador WiFi
-escama preflight          # diagnóstico de la máquina (componentes, versión, perms)
+sudo escama status        # current state (works without sudo)
+sudo escama reconnect     # re-up after unplug/replug of the adapter
+sudo escama genconfig     # regenerate hostapd/dnsmasq from escama.toml
+sudo escama egress        # re-evaluate exit path (VPN/WAN) without dropping the AP
+sudo escama egress vpn    # force exit: auto | vpn | wan | <iface>
+sudo escama watch         # loop: follow the VPN tunnel, re-apply routing
+sudo escama rename <iface> <new>   # rename a WiFi adapter
+escama preflight          # machine check (components, version, permissions)
 
-sudo escama-tui           # menú interactivo (whiptail) para editar la config
+sudo escama-tui           # interactive menu (whiptail) to edit the config
 ```
 
-## Configuración
+## Configuration
 
-Todo vive en `/etc/escama/escama.toml` (TOML, comentarios incluidos). Se edita
-con `escama-tui` o a mano, y los cambios aplican con `sudo escama restart`.
+Everything lives in `/etc/escama/escama.toml` (TOML, comments included). Edit
+it with `escama-tui` or by hand; changes apply with `sudo escama restart`.
 
 ```toml
-AP_IFACE  = "stonepi"     # la interfaz que hace de AP
-WAN_IFACE = "wn8200nd"    # la que trae internet ("" = auto-detectar)
+AP_IFACE  = "stonepi"     # interface acting as AP
+WAN_IFACE = "wn8200nd"    # the one with internet ("" = auto-detect)
 SSID      = "escama"
-CHANNEL_MODE = "auto"     # auto = elige de {1,6,11} sin solapar la WAN
-EGRESS_MODE  = "auto"     # auto = VPN si hay túnel, si no WAN
-                          # vpn  = kill-switch (sin túnel no navegan)
-                          # wan  = siempre WAN, ignora la VPN
+CHANNEL_MODE = "auto"     # auto = pick from {1,6,11} without overlapping the WAN
+EGRESS_MODE  = "auto"     # auto = VPN if a tunnel is up, else WAN
+                          # vpn  = kill-switch (no tunnel, no traffic)
+                          # wan  = always WAN, ignore the VPN
 ```
 
-Para invertir los roles (usar la WAN actual como AP) alcanza con intercambiar
-`AP_IFACE` y `WAN_IFACE`: el NAT y las validaciones siguen la config, no hay
-nada hardcodeado.
+To swap roles (use the current WAN as the AP) just exchange `AP_IFACE` and
+`WAN_IFACE`: NAT and validation follow the config, nothing is hardcoded.
 
-## Renombrar adaptadores
+## Renaming adapters
 
-Los dongles USB aparecen como `wlx<MAC>` (imposible de memorizar). `rename`
-deja una regla udev por MAC y renombra la interfaz al instante:
+USB dongles show up as `wlx<MAC>` (impossible to remember). `rename` writes a
+udev rule keyed by MAC and renames the interface instantly:
 
 ```bash
-sudo escama rename wlx020304050607 WU900
+sudo escama rename wlx020304050607 wifi-usb
 ```
 
-- Persistente (sobrevive a boots y re-plugs) y en vivo: baja la interfaz,
-  la renombra y la vuelve a subir.
-- Revincula los perfiles de NetworkManager atados al nombre viejo, así que la
-  conexión WiFi actual no se corta.
-- Actualiza `AP_IFACE`/`WAN_IFACE` del toml si apuntaban al nombre viejo.
-- Si esa MAC tenía una regla manual en `70-persistent-net.rules` o similar,
-  la retira y la consolida en `76-escama-ifaces.rules`.
+- Persistent (survives boots and re-plugs) and live: brings the interface
+  down, renames it, brings it back up.
+- Rebinds NetworkManager profiles tied to the old name, so your current WiFi
+  connection does not drop.
+- Updates `AP_IFACE`/`WAN_IFACE` in the toml if they pointed at the old name.
+- If that MAC had a manual rule in `70-persistent-net.rules` or similar, it is
+  retired and consolidated into `76-escama-ifaces.rules`.
 
-## Salida por VPN
+## VPN egress
 
-Si el equipo tiene una VPN activa, los clientes del AP salen por el túnel en
-vez de quedar fuera de internet. Soporta ProtonVPN, WARP, WireGuard y OpenVPN
-(detección automática o forzada), con policy routing y MSS clamp según el
-túnel. Detalle por proveedor: [docs-es/VPN-EGRESS.md](docs-es/VPN-EGRESS.md).
+If the host has a VPN running, AP clients exit through the tunnel instead of
+losing internet. ProtonVPN, WARP, WireGuard and OpenVPN are supported
+(auto-detected or forced), with policy routing and MSS clamp per tunnel.
+Provider-by-provider details: [docs/VPN-EGRESS.md](docs/VPN-EGRESS.md).
 
-## Arranque automático (systemd)
+## Autostart (systemd)
 
 ```bash
-sudo ./install.sh enable          # al boot + ahora
-sudo ./install.sh disable         # no al boot + detener
-sudo ./install.sh enable --user   # al iniciar sesión, sin unit de sistema
+sudo ./install.sh enable          # at boot + now
+sudo ./install.sh disable         # no boot + stop
+sudo ./install.sh enable --user   # at login, no system unit
 ```
 
-`Restart=on-failure` cubre muerte del proceso, no hardware ausente: si el
-adaptador se desenchufa, `sudo escama reconnect` a mano.
+`Restart=on-failure` covers process death, not missing hardware: if the
+adapter is unplugged, run `sudo escama reconnect`.
 
-## Sin sudo (opcional)
+## Without sudo (optional)
 
-Además del modo clásico con `sudo`, existe un modo rootless: un binario ELF
-con `CAP_NET_ADMIN`/`RAW`/`BIND_SERVICE` le pasa las capabilities al núcleo
-Python (el kernel ignora file capabilities en scripts con shebang). Cubre las
-operaciones de red; lo que necesita escribir en `/etc` degrada con un mensaje
-explícito. `escama status` muestra siempre qué modo está corriendo y dónde
-quedan log y confs, para no confundir "no arrancó" con "no tengo permiso".
+Besides the classic `sudo` mode there is a rootless mode: an ELF binary with
+`CAP_NET_ADMIN`/`RAW`/`BIND_SERVICE` passes those capabilities to the Python
+core (the kernel ignores file capabilities on shebang scripts). It covers
+network operations; anything needing to write `/etc` degrades with an explicit
+message. `escama status` always shows which mode is running and where logs and
+confs land, so "it did not start" is never confused with "I lack permission".
 
-|                             | con sudo              | rootless            |
-|-----------------------------|-----------------------|---------------------|
-| Red (hostapd, NAT, rutas)   | sí                    | sí, vía el launcher |
-| Autostart                   | unit de sistema       | unit de usuario     |
+|                             | with sudo             | rootless             |
+|-----------------------------|-----------------------|----------------------|
+| Network (hostapd, NAT, routes) | yes                | yes, via the launcher |
+| Autostart                   | system unit           | user unit            |
 | Log                         | `/var/log/escama-ap.log` | `~/.local/state/escama/` |
-| Recargar módulo del driver  | sí                    | degrada con motivo  |
+| Reload driver module        | yes                   | degrades with reason |
 
 ## Testing
 
@@ -140,20 +142,25 @@ quedan log y confs, para no confundir "no arrancó" con "no tengo permiso".
 python3 -m pytest tests/test_escama.py -q    # 124 tests, ~15 s
 ```
 
-Los tests mockean `run()`/`subprocess`/`os`: nunca tocan las interfaces reales
-(lo garantiza un fixture que bloquea subprocess en toda la suite). Mutation
-testing opcional con `mutmut run` (config en `setup.cfg`).
+Tests mock `run()`/`subprocess`/`os`: they never touch real interfaces
+(enforced by a fixture that blocks subprocess for the whole suite). Optional
+mutation testing with `mutmut run` (config in `setup.cfg`).
 
-## Requisitos
+## Requirements
 
-- Debian/Linux con NetworkManager (`nmcli`)
-- Python 3.10+ — solo stdlib, cero dependencias
-- `hostapd`, `dnsmasq`, `iw`; `whiptail` solo para la TUI
-- Un adaptador WiFi con soporte de modo AP (drivers rtl8192eu y aic8800 verificados)
+- Debian/Linux with NetworkManager (`nmcli`)
+- Python 3.10+ — stdlib only, zero dependencies
+- `hostapd`, `dnsmasq`, `iw`; `whiptail` for the TUI only
+- A WiFi adapter with AP-mode support (rtl8192eu and aic8800 drivers verified)
 
-## Documentación
+## Documentation
 
-- [docs/TECHNICAL.md](docs/TECHNICAL.md) — diseño interno (inglés)
-- [docs-es/TECHNICAL.md](docs-es/TECHNICAL.md) — diseño interno (español)
-- [docs-es/VPN-EGRESS.md](docs-es/VPN-EGRESS.md) — salida por túnel, casos y diagnóstico
-- [CHANGELOG.md](CHANGELOG.md) — historial de versiones
+- [docs/TECHNICAL.md](docs/TECHNICAL.md) — internal design (English)
+- [docs-es/TECHNICAL.md](docs-es/TECHNICAL.md) — internal design (Spanish)
+- [docs/VPN-EGRESS.md](docs/VPN-EGRESS.md) — tunnel egress, cases, troubleshooting
+- [CHANGELOG.md](CHANGELOG.md) — release history
+- [SECURITY.md](SECURITY.md) — how to report vulnerabilities
+
+## License
+
+[MIT](LICENSE)

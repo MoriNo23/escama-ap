@@ -2056,7 +2056,7 @@ def test_do_rename_regla_udev_y_retiro_legacy(monkeypatch, tmp_path):
     legacy la regla de esa misma MAC (con su comentario). Idempotente."""
     legacy1, legacy2, toml = _rename_entorno(
         monkeypatch, tmp_path, old="wn8200nd",
-        mac="02:1a:2b:3c:4d:02")  # la MAC del wn8200nd en 70-persistent-net
+        mac="02:1a:2b:3c:4d:02")  # MAC de ejemplo (wn8200nd)
     calls = []
     monkeypatch.setattr(escama, "run", lambda c, **k: calls.append(c) or type(
         "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
