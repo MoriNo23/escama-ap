@@ -2,6 +2,8 @@
 
 # escama-ap
 
+<img src="docs/logo/social-1280x640.png" alt="escama ap — wifi access point" width="100%">
+
 Turns a WiFi adapter into an Access Point on Debian/Linux.
 One command brings up the AP (hostapd + dnsmasq); connected clients reach the
 internet through the WAN or a VPN tunnel, with automatic NAT.
