@@ -837,6 +837,31 @@ def test_tui_sin_whiptail_cae_a_status(monkeypatch, capsys):
     assert "whiptail" in capsys.readouterr().err
 
 
+def test_whiptail_dibuja_en_terminal_y_devuelve_stderr(monkeypatch):
+    """whiptail pinta en stdout y la respuesta va en stderr (man page)."""
+    import importlib.util
+    ruta = os.path.join(RAIZ_REPO, "opt", "escama", "escama-tui.py")
+    spec = importlib.util.spec_from_file_location("escama_tui_wt", ruta)
+    tui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tui)
+    vistos = []
+
+    class R:
+        returncode = 0
+        stdout = "escape-sequence-dibujo"
+        stderr = "1\n"
+
+    def fake_run(_cmd, **kw):
+        vistos.append(kw)
+        return R()
+
+    monkeypatch.setattr(tui.subprocess, "run", fake_run)
+    assert tui.whiptail_menu("t", "texto", ["1", "uno"]) == "1"
+    assert "capture_output" not in vistos[0]
+    assert vistos[0]["stderr"] == tui.subprocess.PIPE
+    assert vistos[0].get("stdout") in (None, tui.subprocess.STDOUT)
+
+
 def test_tui_no_anuncia_guardado_si_falla_delegacion(monkeypatch, tmp_path):
     """Sin sudo -n la TUI no debe anunciar guardado ni tocar la config."""
     import importlib.util

@@ -41,18 +41,20 @@ def whiptail_menu(title, text, items, height=18, width=70, menu_h=9,
         cmd += ["--default-item", str(default)]
     cmd += ["--title", title, "--menu", text, str(height), str(width),
             str(menu_h)] + items
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    # whiptail dibuja en stdout (heredado) y escribe la respuesta en stderr.
+    p = subprocess.run(cmd, text=True, stderr=subprocess.PIPE)
     if p.returncode != 0:
         return None
-    return p.stdout.strip()
+    return (getattr(p, "stderr", "") or "").strip()
 
 
 def whiptail_input(title, text, init):
     cmd = ["whiptail", "--inputbox", text, "10", "70", init]
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    # whiptail dibuja en stdout (heredado) y escribe la respuesta en stderr.
+    p = subprocess.run(cmd, text=True, stderr=subprocess.PIPE)
     if p.returncode != 0:
         return None
-    return p.stdout.strip()
+    return (getattr(p, "stderr", "") or "").strip()
 
 
 def read_version() -> str:

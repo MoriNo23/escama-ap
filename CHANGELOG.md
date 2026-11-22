@@ -1,3 +1,13 @@
+## 2.4.1 — 2026-11-22
+
+### Corregido
+- **Menú TUI visible**: `whiptail` dibuja la interfaz en stdout y devuelve la
+  selección en stderr (confirmado en su man page). Los helpers capturaban
+  stdout y leían la respuesta de ahí, así que el menú quedaba dibujado en un
+  pipe descartado y la selección llegaba vacía. Ahora se hereda stdout y se lee
+  stderr. Bump **patch**: corrige un comportamiento que ya violaba el requisito
+  de menú contextual.
+
 ## 2.4.0 — 2026-11-22
 
 ### Agregado
