@@ -48,12 +48,12 @@
 
 ## 8. Presentación y mantenimiento en GitHub (D11)
 
-- [ ] 8.1 Corregir `README.md` y `README.es.md`: badge de CI dinámico sin `tests-139`, Python 3.11+, quick start y sección de TUI coordinada con 5.5, y enlaces a docs/`CHANGELOG.md`/`SECURITY.md`; verificar render en GitHub y que no queden `139` ni `3.10`.
-- [ ] 8.2 Actualizar `docs/TECHNICAL.md` y `docs-es/TECHNICAL.md` con la versión de Python y el conteo de tests vigente, sin números duros; verificar con búsqueda que no queden `139`, `124` ni `3.10+`.
-- [ ] 8.3 Crear `CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/bug_report.md`, `.github/ISSUE_TEMPLATE/feature_request.md` y `.github/PULL_REQUEST_TEMPLATE.md` con checklist de tests, changelog, bump y spec; verificar que GitHub los ofrezca al abrir un issue o PR.
-- [ ] 8.4 Ajustar `.github/dependabot.yml` con `groups` para GitHub Actions, label `dependencies` y `commit-message` con prefijo `chore(deps)`; verificar el YAML y que el próximo PR de Dependabot agrupe las actualizaciones.
-- [ ] 8.5 Completar la metadata del repo (homepage, social preview con `docs/logo/social-1280x640.png`, topics ya existentes) y verificar que el reporte privado de vulnerabilidades esté habilitado; documentar la decisión sobre Discussions/Wiki y branch protection como recomendación, no cambio automático; verificar con `gh repo view` y `gh api`.
-- [ ] 8.6 Crear la release `v2.4.0` desde `VERSION` y `CHANGELOG.md` con `gh release create`; verificar `gh release view v2.4.0` y que el badge de release del README apunte a ella.
+- [x] 8.1 Corregir `README.md` y `README.es.md`: badge de CI dinámico sin `tests-139`, Python 3.11+, quick start y sección de TUI coordinada con 5.5, y enlaces a docs/`CHANGELOG.md`/`SECURITY.md`; verificar render en GitHub y que no queden `139` ni `3.10`.
+- [x] 8.2 Actualizar `docs/TECHNICAL.md` y `docs-es/TECHNICAL.md` con la versión de Python y el conteo de tests vigente, sin números duros; verificar con búsqueda que no queden `139`, `124` ni `3.10+`.
+- [x] 8.3 Crear `CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/bug_report.md`, `.github/ISSUE_TEMPLATE/feature_request.md` y `.github/PULL_REQUEST_TEMPLATE.md` con checklist de tests, changelog, bump y spec; verificar que GitHub los ofrezca al abrir un issue o PR.
+- [x] 8.4 Ajustar `.github/dependabot.yml` con `groups` para GitHub Actions, label `dependencies` y `commit-message` con prefijo `chore(deps)`; verificar el YAML y que el próximo PR de Dependabot agrupe las actualizaciones.
+- [x] 8.5 Completar la metadata del repo (homepage, social preview con `docs/logo/social-1280x640.png`, topics ya existentes) y verificar que el reporte privado de vulnerabilidades esté habilitado; documentar la decisión sobre Discussions/Wiki y branch protection como recomendación, no cambio automático; verificar con `gh repo view` y `gh api`.
+- [x] 8.6 Crear la release `v2.4.0` desde `VERSION` y `CHANGELOG.md` con `gh release create`; verificar `gh release view v2.4.0` y que el badge de release del README apunte a ella.
 
 ## Workflow follow-up
 
