@@ -109,6 +109,10 @@ into a black hole.
 
 If you run several tunnels, pin one manually: `VPN_IFACE="proton0"`.
 
+In the TUI, choose `Interfaz WAN: AUTO` to store `WAN_IFACE=""`: escama detects
+the interface with the default route and reapplies egress on save, without
+stopping the AP.
+
 ### What gets applied when the egress is the VPN
 
 1. `MASQUERADE -o <tunnel> -s <AP_SUBNET>` (instead of `-o WAN`).

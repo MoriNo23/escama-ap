@@ -80,6 +80,10 @@ delegates every mutation to the same commands used from the shell. Without a
 TTY (scripts, systemd) it keeps printing `status`; without `whiptail` it prints
 the install hint and falls back to `status`.
 
+In the configuration menu, `Interfaz WAN: AUTO` stores `WAN_IFACE=""`. escama
+then picks the interface with the default route and reapplies egress
+immediately, without restarting the AP.
+
 ## Configuration
 
 Everything lives in `/etc/escama/escama.toml` (TOML, comments included). Edit

@@ -886,6 +886,63 @@ def test_tui_sin_whiptail_cae_a_status(monkeypatch, capsys):
     assert "whiptail" in capsys.readouterr().err
 
 
+def _cargar_tui(nombre):
+    import importlib.util
+    ruta = os.path.join(RAIZ_REPO, "opt", "escama", "escama-tui.py")
+    spec = importlib.util.spec_from_file_location(nombre, ruta)
+    tui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tui)
+    return tui
+
+
+def test_wan_auto_devuelve_valor_vacio(monkeypatch):
+    """Elegir AUTO en el submenú de WAN debe guardar WAN_IFACE=''."""
+    tui = _cargar_tui("escama_tui_wan_auto")
+    monkeypatch.setattr(tui, "list_ifaces", lambda: ["WU900", "lan1"])
+    vistos = []
+
+    def fake_menu(_titulo, _texto, items, *_a, **kw):
+        vistos.append((items, kw))
+        return "AUTO"
+
+    monkeypatch.setattr(tui, "whiptail_menu", fake_menu)
+    assert tui.elegir_wan({"WAN_IFACE": "WU900"}) == ""
+    assert vistos[0][0][:2] == ["AUTO", "Detectar internet automaticamente"]
+
+
+def test_cambio_wan_aplica_egress_sin_reiniciar(monkeypatch):
+    tui = _cargar_tui("escama_tui_egress_caliente")
+    llamadas = []
+
+    class R:
+        returncode = 0
+        stdout = "Egress aplicado: WU900"
+        stderr = ""
+
+    def fake_run(cmd, **_kw):
+        llamadas.append(list(cmd))
+        return R()
+
+    monkeypatch.setattr(tui.subprocess, "run", fake_run)
+    ok, salida = tui.aplicar_cambio_wan("WU900", "")
+    assert ok is True and "Egress aplicado" in salida
+    assert llamadas == [["escama", "egress"]]
+    llamadas.clear()
+    assert tui.aplicar_cambio_wan("", "") == (True, "")
+    assert llamadas == []
+
+
+def test_texto_guardado_fallo_egress_no_anuncia_exito():
+    tui = _cargar_tui("escama_tui_texto_guardado")
+    cfg = {"AP_IFACE": "stonepi", "WAN_IFACE": "", "SSID": "escama"}
+    texto = tui.texto_guardado(cfg, True, False,
+                               "rc=1: iface ausente", "status real")
+    assert "NO se aplico" in texto
+    assert "sudo escama egress" in texto
+    assert "Salida reaplicada" not in texto
+    assert "status real" in texto
+
+
 def test_whiptail_dibuja_en_terminal_y_devuelve_stderr(monkeypatch):
     """whiptail pinta en stdout y la respuesta va en stderr (man page)."""
     import importlib.util

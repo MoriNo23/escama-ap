@@ -80,6 +80,10 @@ estado y delega cada mutación en los mismos comandos que se usan desde la shell
 Sin TTY (scripts, systemd) sigue imprimiendo `status`; sin `whiptail` avisa cómo
 instalarlo y cae a `status`.
 
+En el menú de configuración, `Interfaz WAN: AUTO` guarda `WAN_IFACE=""`. escama
+elige entonces la interfaz con la ruta por defecto y reaplica la salida de
+inmediato, sin reiniciar el AP.
+
 ## Configuración
 
 Todo vive en `/etc/escama/escama.toml` (TOML, comentarios incluidos). Se edita

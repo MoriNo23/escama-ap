@@ -1,3 +1,17 @@
+## 2.5.0 — 2026-11-22
+
+### Agregado
+- **`WAN AUTO` en la TUI**: el submenú de interfaz WAN ofrece una opción
+  automática que guarda `WAN_IFACE=""`. escama detecta entonces la interfaz con
+  la ruta por defecto —por ejemplo `wlxd20dab62b48f` en vez de un dongle caído—.
+- **Aplicación en caliente**: al guardar un cambio de WAN, la TUI ejecuta
+  `escama egress` sin bajar el AP. Muestra el resultado real; si falla, dice que
+  la configuración se guardó pero la salida no se aplicó y da el comando manual.
+
+### Notas
+- Bump **minor**: se agrega una opción nueva compatible; la CLI, el TOML y el core
+  de detección no cambian.
+
 ## 2.4.2 — 2026-11-22
 
 ### Corregido

@@ -108,6 +108,10 @@ a un agujero negro.
 
 Si tenés varios tunnels arriba, fijalo a mano: `VPN_IFACE="proton0"`.
 
+En la TUI elegí `Interfaz WAN: AUTO` para guardar `WAN_IFACE=""`: escama detecta
+la interfaz con la ruta por defecto y reaplica la salida al guardar, sin detener
+el AP.
+
 ### Qué aplica cuando el egress es VPN
 
 1. `MASQUERADE -o <tunnel> -s <AP_SUBNET>` (en vez de `-o WAN`).

@@ -101,6 +101,52 @@ def _recalcular_dhcp(cfg: dict) -> None:
     cfg["DHCP_END"] = str(ipaddress.ip_address(int(red.broadcast_address) - 1))
 
 
+WAN_AUTO = "AUTO"
+
+
+def elegir_wan(cfg: dict) -> str:
+    """Devuelve el nuevo WAN_IFACE; AUTO significa autodeteccion ('')."""
+    ifaces = list_ifaces()
+    items = [WAN_AUTO, "Detectar internet automaticamente"]
+    for iface in ifaces:
+        items += [iface, iface]
+    actual = cfg.get("WAN_IFACE") or WAN_AUTO
+    sel = whiptail_menu("WAN iface", "Elige interfaz WAN (internet):", items,
+                        21, 66, min(len(ifaces) + 1, 12), default=actual)
+    if sel is None:
+        return cfg.get("WAN_IFACE", "")
+    return "" if sel == WAN_AUTO else sel
+
+
+def aplicar_cambio_wan(antes: str, despues: str) -> tuple:
+    """Reaplica la salida en caliente solo si WAN_IFACE cambio."""
+    if antes == despues:
+        return True, ""
+    p = subprocess.run(["escama", "egress"], capture_output=True, text=True,
+                       check=False)
+    salida = ((p.stdout or "") + (p.stderr or "")).strip()
+    return p.returncode == 0, salida
+
+
+def texto_guardado(cfg: dict, cambio_wan: bool, ok_egress: bool,
+                   salida_egress: str, salida_status: str) -> str:
+    lineas = [f"Configuracion guardada en {CONFIG_FILE}", "",
+              f"AP={cfg['AP_IFACE']} WAN={cfg['WAN_IFACE'] or 'AUTO'} "
+              f"SSID={cfg['SSID']}"]
+    if cambio_wan:
+        if ok_egress:
+            lineas += ["", "Salida reaplicada sin reiniciar el AP.",
+                       salida_egress or "(sin salida)"]
+        else:
+            lineas += ["", "Configuracion guardada, pero la salida NO se aplico.",
+                       "Aplicá a mano con: sudo escama egress",
+                       salida_egress or "(sin salida)"]
+    else:
+        lineas += ["", "Para aplicar cambios de red: sudo escama restart"]
+    lineas += ["", "--- status ---", salida_status]
+    return "\n".join(lineas)
+
+
 def construir_menu(estado: dict) -> tuple:
     """Menú principal contextual: estado real, acciones válidas y sugerencia."""
     texto = (f"AP {estado['ap']} ({estado['ip']}) - "
@@ -191,6 +237,7 @@ def main():
     # Navegacion y consultas sin privilegio (spec `uso-sin-privilegios`).
     # Solo guardar exige root: guardar_config() delega o degrada explicitamente.
     cfg = escama.load_env()
+    wan_inicial = cfg["WAN_IFACE"]
     salir_sin_guardar = False
     while True:
         estado = escama.estado_escama(cfg)
@@ -210,7 +257,7 @@ def main():
             "escama-ap Config",
             "Elige que configurar:",
             ["1", f"Interfaz AP: {cfg['AP_IFACE']}",
-             "2", f"Interfaz WAN: {cfg['WAN_IFACE']}",
+             "2", f"Interfaz WAN: {cfg['WAN_IFACE'] or 'AUTO'}",
              "3", f"SSID: {cfg['SSID']}",
              "4", f"Canal: {cfg['CHANNEL']}",
              "5", f"IP/Subred AP: {cfg['AP_IP']}/{cfg['AP_CIDR']}",
@@ -238,12 +285,7 @@ def main():
             if sel:
                 cfg["AP_IFACE"] = sel
         elif choice == "2":
-            ifaces = list_ifaces()
-            items = [i for pair in [(x, x) for x in ifaces] for i in pair]
-            sel = whiptail_menu("WAN iface", "Elige interfaz WAN (internet):", items, 20, 60,
-                                min(len(ifaces), 12))
-            if sel:
-                cfg["WAN_IFACE"] = sel
+            cfg["WAN_IFACE"] = elegir_wan(cfg)
         elif choice == "3":
             v = whiptail_input("SSID", "Nombre de la red:", cfg["SSID"])
             if v:
@@ -326,19 +368,18 @@ def main():
         return 0
     if not guardar_config(cfg):
         sys.exit(1)
-    # regenerar confs
+    # regenerar confs y reaplicar la salida si el WAN cambio (sin bajar el AP)
     subprocess.run(["escama", "genconfig"], check=False)
-    # feedback de aplicación
+    cambio_wan = cfg["WAN_IFACE"] != wan_inicial
+    ok_egress, salida_egress = aplicar_cambio_wan(wan_inicial,
+                                                  cfg["WAN_IFACE"])
     subprocess.run(["whiptail", "--infobox", "Aplicando configuracion...", "5", "50"],
                    check=False)
     time.sleep(1)
-    # traer estado real para feedback
     status = subprocess.run(["escama", "status"], capture_output=True, text=True)
     subprocess.run(["whiptail", "--msgbox",
-                    f"Configuracion guardada en {CONFIG_FILE}\n\n"
-                    f"AP={cfg['AP_IFACE']} WAN={cfg['WAN_IFACE']} SSID={cfg['SSID']}\n\n"
-                    f"Para aplicar: sudo escama restart\n\n"
-                    f"--- status ---\n{(status.stdout or '').strip()}", 20, 70],
+                    texto_guardado(cfg, cambio_wan, ok_egress, salida_egress,
+                                   (status.stdout or "").strip()), 20, 70],
                    check=False)
     sys.exit(0)
 
