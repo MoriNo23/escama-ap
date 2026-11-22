@@ -24,6 +24,14 @@
   kernel ignores file capabilities on shebang scripts. What cannot be rootless
   (driver module reload needs `CAP_SYS_MODULE`, `nmcli` needs NM authorization)
   degrades with an explicit message, never silently.
+- **Launcher whitelist**: it only executes the escama `core` and the exact
+  rootless probe (`ip link add|del escv<PID> type dummy`). Arbitrary binaries —
+  and arbitrary `ip` arguments — are rejected with rc 2, so the network
+  capabilities cannot be used as a generic privileged runner.
+- **Default entry point**: `escama` with a TTY opens the contextual whiptail
+  menu; without a TTY it stays `status`. The TUI reads the same structured state
+  (`estado_escama()`) and delegates mutations. Saving config without root uses
+  `sudo -n install` on a temporary copy and fails explicitly otherwise.
 - **Preflight**: `escama preflight` checks the machine before operating —
   components, repo-vs-installed version, and rootless viability verified with a
   real operation (not `getcap`). Read-only, runs without privilege.
@@ -54,7 +62,7 @@
 | `etc/systemd/user/escama-egress.service` | User unit — egress watcher in rootless mode |
 | `VERSION` | Single version source, read at runtime by the three entry points |
 | `CHANGELOG.md` | Version history (0.x retrospective + semver per change) |
-| `tests/test_escama.py` | 124 unit tests, system-call mocks (command in §7) |
+| `tests/test_escama.py` | unit tests, system-call mocks (command in §7) |
 | `setup.cfg` | mutmut config |
 
 ## 3. `escama.toml` (source of truth)
@@ -146,7 +154,7 @@ systemd `Restart=on-failure` only covers process death, not missing hardware.
 ## 7. Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 139 tests, mocked, ~16s
+python3 -m pytest tests/test_escama.py -q   # suite completa, mockeada, ~16s
 ~/.local/bin/mutmut run                      # mutation testing (reads setup.cfg)
 ```
 Tests mock `run()`/`subprocess`/`os` → **never touch stonepi or wn8200nd**.
@@ -173,7 +181,7 @@ command it tried to run.
 
 ## 8. Requirements
 
-- Python 3.10+, `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
+- Python 3.11+ (`tomllib`), `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
 - RTL8192EU driver built with `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` on this box)
 - `whiptail` only for the TUI
 - VPN (ProtonVPN / warp-cli / WireGuard): **does coexist**. Client egress is moved to

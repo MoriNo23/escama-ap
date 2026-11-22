@@ -86,7 +86,7 @@ Cloudflare has an official mode for a Linux host to route a whole LAN: enable
 
 ## 3. What escama implements
 
-`EGRESS_MODE` in `/etc/escama/escama.env`:
+`EGRESS_MODE` in `/etc/escama/escama.toml`:
 
 | Mode | Behavior |
 |------|----------|
@@ -204,6 +204,20 @@ matter the most (MTU 1280). Notes:
 tailnet and sending all client traffic there yields no internet. If you use
 Tailscale without an exit node, leave `EGRESS_MODE="wan"` or pin `VPN_IFACE`
 to another tunnel.
+
+### Cleanup and reconciliation
+
+Every rule escama installs carries `-m comment --comment escama`. On `stop` or
+an egress change the core reads `iptables-save` and `ip rule show` first and
+deletes its own rules by marker, AP subnet and table `51821`. The state file
+(`escama-egress.state`) is now a cache for `IPFWD`/`RP_FILTER` and the previous
+egress: cleanup no longer depends on it, so a stale or missing file (or a
+different `euid` mode) cannot leave orphaned NAT or policy rules.
+
+The AP/WAN roles detected at `start` are saved to `escama-roles.state` and read
+back by `stop`, `egress` and `watch`; a config still pointing at the old
+interface no longer makes cleanup act on the wrong NIC. `apply_egress` takes a
+`flock` and verifies the NAT rule in the kernel before reporting success.
 
 ## 6. Quick diagnosis
 

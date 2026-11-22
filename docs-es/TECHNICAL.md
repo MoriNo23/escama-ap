@@ -24,6 +24,14 @@
   kernel ignora las file capabilities en scripts con shebang. Lo que no puede
   ser rootless (recargar el módulo del driver exige `CAP_SYS_MODULE`, `nmcli`
   exige autorización de NM) degrada con mensaje explícito, nunca en silencio.
+- **Whitelist del launcher**: solo ejecuta el `core` de escama y la sonda
+  exacta del rootless (`ip link add|del escv<PID> type dummy`). Cualquier
+  binario — y cualquier argumento arbitrario de `ip` — se rechaza con rc 2:
+  las capabilities de red no sirven como ejecutor genérico privilegiado.
+- **Entrada por defecto**: `escama` con TTY abre el menú whiptail contextual;
+  sin TTY sigue siendo `status`. La TUI lee el mismo estado estructurado
+  (`estado_escama()`) y delega las mutaciones. Guardar la config sin root usa
+  `sudo -n install` sobre una copia temporal y falla explícitamente si no puede.
 - **Preflight**: `escama preflight` comprueba la máquina antes de operar —
   componentes, versión del repo vs instalada, y viabilidad rootless verificada
   con una operación real (no con `getcap`). Solo lectura, corre sin privilegio.
@@ -54,7 +62,7 @@
 | `etc/systemd/user/escama-egress.service` | Unit de usuario — watcher de egress en modo rootless |
 | `VERSION` | Fuente única de la versión, leída en runtime por los tres puntos de entrada |
 | `CHANGELOG.md` | Historial de versiones (0.x retrospectiva + semver por change) |
-| `tests/test_escama.py` | 124 unit tests, mocks de system calls (comando en §7) |
+| `tests/test_escama.py` | tests unitarios, mocks de system calls (comando en §7) |
 | `setup.cfg` | Config mutmut |
 
 ## 3. `escama.toml` (fuente de verdad)
@@ -150,7 +158,7 @@ sudo escama.py reconnect    # igual que restart, para usar tras re-enchufar
 ## 7. Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q   # 139 tests, mockeados, ~16s
+python3 -m pytest tests/test_escama.py -q   # suite completa, mockeada, ~16s
 ~/.local/bin/mutmut run                      # mutation testing (lee setup.cfg)
 ```
 Los tests mockean `run()`/`subprocess`/`os` → **nunca tocan stonepi ni wn8200nd**.
@@ -179,7 +187,7 @@ reload en fallo -95, validación real type AP (pass y fail).
 
 ## 8. Requisitos
 
-- Python 3.10+, `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
+- Python 3.11+ (`tomllib`), `hostapd`, `dnsmasq`, `iw`, `nmcli` (NetworkManager)
 - Driver RTL8192EU con `CONFIG_AP_MODE=y` (DKMS `rtl8192eu/1.6.2` en este equipo)
 - `whiptail` solo para la TUI
 - VPN (ProtonVPN / warp-cli / WireGuard): **sí coexiste**. El egress de los clientes

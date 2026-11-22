@@ -85,7 +85,7 @@ habilitar *Override local interface IP*, `ip_forward=1`, y publicar el CIDR
 
 ## 3. Lo que implementa escama
 
-`EGRESS_MODE` en `/etc/escama/escama.env`:
+`EGRESS_MODE` en `/etc/escama/escama.toml`:
 
 | Modo | Comportamiento |
 |------|----------------|
@@ -199,6 +199,20 @@ el MSS clamp (MTU 1280). Notas:
 `tailscale up --exit-node=<node>`; si no, `tailscale0` solo rutea la tailnet y mandar
 todo el tráfico de los clientes ahí no da internet. Si usás Tailscale sin exit node,
 dejá `EGRESS_MODE="wan"` o fijá `VPN_IFACE` a otro tunnel.
+
+### Limpieza y reconciliación
+
+Toda regla que instala escama lleva `-m comment --comment escama`. En `stop` o
+al cambiar el egress, el core lee primero `iptables-save` y `ip rule show` y
+borra sus propias reglas por marcador, subnet del AP y tabla `51821`. El state
+file (`escama-egress.state`) pasa a ser una caché de `IPFWD`/`RP_FILTER` y del
+egress anterior: la limpieza ya no depende de él, así que un archivo viejo,
+ausente o de otro modo de `euid` no deja reglas NAT/policy huérfanas.
+
+Los roles AP/WAN detectados en `start` se guardan en `escama-roles.state` y los
+leen `stop`, `egress` y `watch`: una config que todavía apunta a la iface vieja
+ya no hace que la limpieza actúe sobre la placa equivocada. `apply_egress`
+toma un `flock` y verifica la regla NAT en el kernel antes de anunciar éxito.
 
 ## 6. Diagnóstico rápido
 

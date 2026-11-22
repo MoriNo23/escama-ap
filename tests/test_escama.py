@@ -566,11 +566,13 @@ def test_apply_egress_vpn_masquerades_on_tunnel_and_blocks_wan(monkeypatch, tmp_
     escama.apply_egress(cfg, "proton0", "vpn")
     flat = [" ".join(c) for c in calls]
     # NAT out the tunnel, never out the WAN
-    assert any("nat -A POSTROUTING -o proton0 -s 10.42.1.0/24 -j MASQUERADE"
+    assert any("nat -A POSTROUTING -o proton0 -s 10.42.1.0/24 "
+               "-m comment --comment escama -j MASQUERADE"
                in f.replace("-t ", "") for f in flat)
     assert not any("-A POSTROUTING -o stonepi" in f for f in flat)
     # kill-switch: AP traffic must not leak out the WAN in the clear
-    assert any("-A FORWARD -i wn8200nd -o stonepi -s 10.42.1.0/24 -j REJECT"
+    assert any("-A FORWARD -i wn8200nd -o stonepi -s 10.42.1.0/24 "
+               "-m comment --comment escama -j REJECT"
                in f for f in flat)
     # policy routing into the tunnel (warp-cli / wg-quick split tunnel)
     assert any(f"route add default dev proton0 table {escama.ESCAMA_TABLE}"
@@ -632,7 +634,8 @@ def test_apply_egress_wan_has_no_killswitch_or_policy_route(monkeypatch, tmp_pat
                AP_SUBNET="10.42.1.0/24")
     escama.apply_egress(cfg, "stonepi", "wan")
     flat = [" ".join(c) for c in calls]
-    assert any("-A POSTROUTING -o stonepi -s 10.42.1.0/24 -j MASQUERADE"
+    assert any("-A POSTROUTING -o stonepi -s 10.42.1.0/24 "
+               "-m comment --comment escama -j MASQUERADE"
                in f for f in flat)
     assert not any("-j REJECT" in f and "-A FORWARD" in f for f in flat)
     assert not any("rule add from" in f for f in flat)
@@ -656,7 +659,8 @@ def test_apply_egress_none_is_fail_closed(monkeypatch, tmp_path):
     escama.apply_egress(cfg, "", "none")
     flat = [" ".join(c) for c in calls]
     assert not any("MASQUERADE" in f and "-A POSTROUTING" in f for f in flat)
-    assert any("-A FORWARD -i wn8200nd -o stonepi -s 10.42.1.0/24 -j REJECT"
+    assert any("-A FORWARD -i wn8200nd -o stonepi -s 10.42.1.0/24 "
+               "-m comment --comment escama -j REJECT"
                in f for f in flat)
 
 
@@ -686,6 +690,192 @@ def test_clear_egress_removes_rules_from_state(monkeypatch, tmp_path):
     assert not any(f"rule del from 10.42.1.0/24 lookup {escama.ESCAMA_TABLE}"
                    in f for f in flat)
     assert not state.exists()  # state cleared
+
+
+def test_clear_egress_sin_state_reconcilia_desde_kernel(monkeypatch, tmp_path):
+    """Sin archivo de estado, la limpieza debe encontrar las reglas propias
+    en el kernel y borrar solo esas."""
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "sin-state"))
+    llamadas = []
+
+    def fake_run(cmd, capture=True, **_kw):
+        llamadas.append(list(cmd))
+        class R:
+            stdout = ""
+            stderr = ""
+            returncode = 1
+        r = R()
+        if cmd[:2] == ["iptables-save", "-t"]:
+            if cmd[2] == "nat":
+                r.stdout = ("*nat\n-A POSTROUTING -o proton0 "
+                            "-s 10.42.1.0/24 -m comment --comment escama "
+                            "-j MASQUERADE\nCOMMIT\n")
+            r.returncode = 0
+        elif cmd[:2] == ["ip", "rule"] and "show" in cmd:
+            r.stdout = "100:\tfrom all iif ap1 lookup 51821\n"
+            r.returncode = 0
+        return r
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    cfg = dict(escama.DEFAULTS, AP_IFACE="ap1", WAN_IFACE="wan1",
+               AP_SUBNET="10.42.1.0/24")
+    escama.clear_egress(cfg)
+    assert any(c[:4] == ["iptables", "-t", "nat", "-D"] and "escama" in c
+               for c in llamadas), llamadas
+    assert ["ip", "rule", "del", "pref", "100"] in llamadas
+
+
+def test_roles_efectivos_para_stop(monkeypatch, tmp_path):
+    """stop debe usar los roles que start detectó, no el TOML viejo."""
+    roles = tmp_path / "roles"
+    roles.write_text("AP_IFACE=wifi-usb\nWAN_IFACE=wan-real\n")
+    monkeypatch.setattr(escama, "ROLES_FILE", str(roles))
+    monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    monkeypatch.setattr(escama, "load_env", lambda: dict(
+        escama.DEFAULTS, AP_IFACE="stonepi", WAN_IFACE="vieja"))
+    monkeypatch.setattr(escama, "iface_exists", lambda _i: True)
+    monkeypatch.setattr(escama.time, "sleep", lambda _s: None)
+    llamadas = []
+
+    def fake_run(cmd, capture=True, **_kw):
+        llamadas.append(list(cmd))
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(escama, "run", fake_run)
+    escama.do_stop()
+    assert any("wifi-usb" in c for c in llamadas), llamadas
+    assert not any("stonepi" in c for c in llamadas), llamadas
+
+
+def test_write_state_usa_reemplazo_atomico(monkeypatch, tmp_path):
+    destino = tmp_path / "state"
+    monkeypatch.setattr(escama, "STATE_FILE", str(destino))
+    real_replace = escama.os.replace
+    vistos = []
+
+    def spy(origen, dest):
+        vistos.append(dest)
+        return real_replace(origen, dest)
+
+    monkeypatch.setattr(escama.os, "replace", spy)
+    escama._write_state(EGRESS="proton0", IPFWD="1")
+    assert vistos == [str(destino)]
+    assert destino.read_text() == "EGRESS=proton0\nIPFWD=1\n"
+    assert not list(tmp_path.glob("state.*.tmp"))
+
+
+def test_estado_escama_expone_estado_real(monkeypatch):
+    cfg = dict(escama.DEFAULTS, AP_IFACE="wifi-usb", WAN_IFACE="wan1",
+               SSID="escama")
+    monkeypatch.setattr(escama, "load_env", lambda: cfg)
+    monkeypatch.setattr(escama, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "type AP", "stderr": ""})())
+    monkeypatch.setattr(escama, "resolve_egress", lambda c: ("proton0", "vpn"))
+    monkeypatch.setattr(escama, "list_tunnels", lambda: ["proton0"])
+    monkeypatch.setattr(escama, "iface_is_up", lambda _i: True)
+    monkeypatch.setattr(escama, "_read_state", lambda: {"EGRESS": "proton0"})
+    st = escama.estado_escama()
+    assert st["ap"] == "wifi-usb" and st["up"] is True
+    assert st["egress"] == "proton0" and st["kind"] == "vpn"
+    assert st["ssid"] == "escama" and st["tunnels"] == ["proton0"]
+
+
+def test_main_sin_args_con_tty_abre_tui(monkeypatch):
+    monkeypatch.setattr(escama, "_is_tty", lambda: True)
+    vistos = []
+
+    def fake_run(cmd, **_kw):
+        vistos.append(list(cmd))
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.setattr(escama.subprocess, "run", fake_run)
+    assert escama.main([]) == 0
+    assert vistos and "escama-tui.py" in vistos[0][-1]
+
+
+def test_main_sin_args_sin_tty_imprime_status(monkeypatch):
+    monkeypatch.setattr(escama, "_is_tty", lambda: False)
+    monkeypatch.setattr(escama, "do_status", lambda: 7)
+    assert escama.main([]) == 7
+
+
+def test_tui_menu_contextual_con_estado_real(monkeypatch):
+    import importlib.util
+    ruta = os.path.join(RAIZ_REPO, "opt", "escama", "escama-tui.py")
+    spec = importlib.util.spec_from_file_location("escama_tui_menu", ruta)
+    tui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tui)
+    texto, items, sugerido = tui.construir_menu({
+        "ap": "wifi-usb", "wan": "wan1", "ssid": "escama",
+        "ip": "10.42.1.1/24", "up": False, "egress": "proton0",
+        "kind": "vpn", "modo": "rootless", "tunnels": ["proton0"]})
+    assert "wifi-usb" in texto and "proton0" in texto
+    assert "Arrancar AP" in items and "Parar AP" not in items
+    assert sugerido in items
+    texto2, items2, sugerido2 = tui.construir_menu(dict(
+        ap="wifi-usb", wan="wan1", ssid="escama", ip="10.42.1.1/24",
+        up=True, egress="", kind="wan", modo="root", tunnels=[]))
+    assert "ACTIVO" in texto2 and "Parar AP" in items2
+    assert sugerido2 == "2"
+
+
+def test_tui_sin_whiptail_cae_a_status(monkeypatch, capsys):
+    import importlib.util
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda _x: None)
+    ruta = os.path.join(RAIZ_REPO, "opt", "escama", "escama-tui.py")
+    spec = importlib.util.spec_from_file_location("escama_tui_sin_wt", ruta)
+    tui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tui)
+    monkeypatch.setattr(tui.escama, "do_status", lambda: 9)
+    monkeypatch.setattr(tui.sys, "argv", ["escama-tui"])
+    assert tui.main() == 9
+    assert "whiptail" in capsys.readouterr().err
+
+
+def test_tui_no_anuncia_guardado_si_falla_delegacion(monkeypatch, tmp_path):
+    """Sin sudo -n la TUI no debe anunciar guardado ni tocar la config."""
+    import importlib.util
+    ruta = os.path.join(RAIZ_REPO, "opt", "escama", "escama-tui.py")
+    spec = importlib.util.spec_from_file_location("escama_tui_bajo_prueba", ruta)
+    tui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tui)
+    destino = tmp_path / "escama.toml"
+    destino.write_text("SSID = 'viejo'\n")
+    monkeypatch.setattr(tui.escama, "CONFIG_FILE", str(destino))
+    monkeypatch.setattr(tui.os, "geteuid", lambda: 1000)
+    vistos = []
+
+    def fake_run(cmd, **_kw):
+        vistos.append(list(cmd))
+        class R:
+            returncode = 1 if cmd[:3] == ["sudo", "-n", "install"] else 0
+        return R()
+
+    monkeypatch.setattr(tui.subprocess, "run", fake_run)
+    assert tui.guardar_config({"SSID": "nuevo"}) is False
+    assert not any("configuracion guardada" in " ".join(c).lower()
+                   for c in vistos), vistos
+    assert destino.read_text() == "SSID = 'viejo'\n"
+
+
+def test_install_status_reporta_user_units():
+    with open(os.path.join(RAIZ_REPO, "install.sh")) as f:
+        src = f.read()
+    cuerpo = src[src.index("cmd_status()"):]
+    assert "user_unit_dir" in cuerpo, "status debe conocer la dir de user units"
+    assert "user_systemctl" in cuerpo, "status debe preguntar al user manager"
+
+
+def test_docs_no_muestran_env_como_formato_vigente():
+    for rel in ("docs/VPN-EGRESS.md", "docs-es/VPN-EGRESS.md",
+                "README.md", "README.es.md"):
+        with open(os.path.join(RAIZ_REPO, rel)) as f:
+            assert "escama.env" not in f.read(), rel
 
 
 def test_effective_dns_switches_with_vpn():
@@ -860,11 +1050,12 @@ def test_do_watch_no_reescribe_hostapd(monkeypatch, tmp_path):
     monkeypatch.setattr(escama, "HOSTAPD_CONF", str(ha))
     monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
     monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    monkeypatch.setattr(escama, "ROLES_FILE", str(tmp_path / "roles"))
     monkeypatch.setattr(escama, "load_env", lambda: dict(
         escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
         CHANNEL="1"))
     monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "proton0")
-    monkeypatch.setattr(escama, "apply_egress", lambda c, e, k: None)
+    monkeypatch.setattr(escama, "apply_egress", lambda c, e, k: True)
 
     def fake_run(cmd, capture=True, **_kw):
         class R:
@@ -890,13 +1081,14 @@ def test_do_egress_no_reescribe_hostapd(monkeypatch, tmp_path):
     monkeypatch.setattr(escama, "HOSTAPD_CONF", str(ha))
     monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
     monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    monkeypatch.setattr(escama, "ROLES_FILE", str(tmp_path / "roles"))
     monkeypatch.setattr(escama, "load_env", lambda: dict(
         escama.DEFAULTS, AP_IFACE="wn8200nd", WAN_IFACE="stonepi",
         CHANNEL="1"))
     monkeypatch.setattr(escama, "iface_exists",
                         lambda x: x in ("stonepi", "proton0"))
     monkeypatch.setattr(escama, "detect_vpn_iface", lambda c: "proton0")
-    monkeypatch.setattr(escama, "apply_egress", lambda c, e, k: None)
+    monkeypatch.setattr(escama, "apply_egress", lambda c, e, k: True)
     monkeypatch.setattr(escama, "run", lambda *a, **k: type(
         "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
     rc = escama.do_egress([])
@@ -912,6 +1104,7 @@ def _egress_banco(monkeypatch, tmp_path, wan_cfg, existe, detectada):
     monkeypatch.setattr(escama, "HOSTAPD_CONF", str(tmp_path / "hostapd.conf"))
     monkeypatch.setattr(escama, "DNSMASQ_CONF", str(tmp_path / "dnsmasq.conf"))
     monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
+    monkeypatch.setattr(escama, "ROLES_FILE", str(tmp_path / "roles"))
     monkeypatch.setattr(escama, "load_env", lambda: dict(
         escama.DEFAULTS, AP_IFACE="stonepi", WAN_IFACE=wan_cfg))
     monkeypatch.setattr(escama, "iface_exists", lambda x: x in existe)
@@ -919,7 +1112,7 @@ def _egress_banco(monkeypatch, tmp_path, wan_cfg, existe, detectada):
     monkeypatch.setattr(escama, "detect_wan_iface", lambda c: detectada)
     aplicado = []
     monkeypatch.setattr(escama, "apply_egress",
-                        lambda c, e, k: aplicado.append((e, k)))
+                        lambda c, e, k: aplicado.append((e, k)) or True)
     monkeypatch.setattr(escama, "run", lambda *a, **k: type(
         "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
     return aplicado
@@ -1034,7 +1227,9 @@ def test_escama_degrada_la_version_sin_mentir(tmp_path, monkeypatch):
     import importlib.util
     src = open(os.path.join(RAIZ_REPO, "opt", "escama", "escama.py")).read()
     # ejecutar solo la funcion de lectura, aislada, en un arbol sin VERSION
-    ns = {"os": os, "__file__": str(tmp_path / "opt" / "escama" / "escama.py")}
+    ns = {"os": os, "contextlib": __import__("contextlib"),
+          "fcntl": __import__("fcntl"), "shlex": __import__("shlex"),
+          "__file__": str(tmp_path / "opt" / "escama" / "escama.py")}
     exec(compile("\n".join(l for l in src.split("\n")
                            if not l.startswith(("import ", "VERSION ="))),
                  "escama.py", "exec"), ns)
@@ -1431,6 +1626,23 @@ def test_launcher_marca_guard_para_core():
         "execv(ESCAMA_PYTHON")
 
 
+def test_launcher_solo_acepta_la_sonda_de_la_probe():
+    """El launcher no debe ser un ejecutor generico de ip(8) con capabilities.
+
+    La unica forma permitida es la sonda del rootless: `link add|del escv<PID>
+    type dummy`. Cualquier otro argv debe rechazarse antes del execve.
+    """
+    p = os.path.join(RAIZ_REPO, "opt", "escama", "escama-launch.c")
+    with open(p) as f:
+        src = f.read()
+    assert "es_sonda_valida" in src, "falta la validacion de la sonda"
+    assert "isdigit" in src, "el nombre de la dummy debe ser escv<digits>"
+    ip_branch = src.index('strcmp(argv[1], "/usr/bin/ip")')
+    valida = src.index("es_sonda_valida(", ip_branch)
+    exec_ip = src.index("execv(argv[1], &argv[1])")
+    assert ip_branch < valida < exec_ip, "validar antes de conceder capabilities"
+
+
 def test_preflight_reporta_rootless(monkeypatch, capsys):
     monkeypatch.setattr(escama, "preflight", lambda: {
         "estado": "completa", "componentes": {}, "faltan": [],
@@ -1453,7 +1665,7 @@ def test_run_no_antepone_sudo_con_caps_del_launcher(monkeypatch):
     """Con capabilities (guard activo) NO debe anteponer sudo: el modo
     rootless existe justamente para no pedir password."""
     monkeypatch.setattr(escama.os, "geteuid", lambda: 1000)
-    monkeypatch.setenv("ESCAMA_VIA_LAUNCHER", "1")
+    monkeypatch.setattr(escama, "_tiene_caps_del_launcher", lambda: True)
     vistos = []
 
     def fake_subprocess_run(cmd, **kw):
@@ -1504,21 +1716,64 @@ def test_run_no_escala_si_ya_es_root(monkeypatch):
     assert vistos[0] == ["ip", "link", "show"]
 
 
-def test_tiene_caps_detecta_el_guard():
-    import os as _os
-    previo = _os.environ.get("ESCAMA_VIA_LAUNCHER")
-    try:
-        _os.environ.pop("ESCAMA_VIA_LAUNCHER", None)
-        assert escama._tiene_caps_del_launcher() is False
-        _os.environ["ESCAMA_VIA_LAUNCHER"] = "1"
-        assert escama._tiene_caps_del_launcher() is True
-        _os.environ["ESCAMA_VIA_LAUNCHER"] = "0"
-        assert escama._tiene_caps_del_launcher() is False
-    finally:
-        if previo is None:
-            _os.environ.pop("ESCAMA_VIA_LAUNCHER", None)
-        else:
-            _os.environ["ESCAMA_VIA_LAUNCHER"] = previo
+def test_guard_falso_por_entorno_no_omite_verificacion(monkeypatch):
+    """Exportar la variable no basta: sin capabilities en CapEff no hay guard."""
+    import builtins
+    import io
+    real_open = builtins.open
+
+    def fake_open(ruta, *a, **kw):
+        if str(ruta) == "/proc/self/status":
+            return io.StringIO("Name:\tpython\nCapEff:\t0000000000000000\n")
+        return real_open(ruta, *a, **kw)
+
+    monkeypatch.setenv("ESCAMA_VIA_LAUNCHER", "1")
+    monkeypatch.setattr(builtins, "open", fake_open)
+    assert escama._tiene_caps_del_launcher() is False
+
+
+def test_guard_valido_por_cap_eff(monkeypatch):
+    """El core lanzado por el launcher tiene las tres caps en CapEff."""
+    import builtins
+    import io
+    real_open = builtins.open
+
+    def fake_open(ruta, *a, **kw):
+        if str(ruta) == "/proc/self/status":
+            return io.StringIO("CapEff:\t0000000000003400\n")
+        return real_open(ruta, *a, **kw)
+
+    monkeypatch.delenv("ESCAMA_VIA_LAUNCHER", raising=False)
+    monkeypatch.setattr(builtins, "open", fake_open)
+    assert escama._tiene_caps_del_launcher() is True
+
+
+def test_apply_egress_toma_lock(monkeypatch, tmp_path):
+    """Dos aplicaciones concurrentes no pueden entrar al mismo tiempo."""
+    import fcntl
+    lock = tmp_path / "egress.lock"
+    monkeypatch.setattr(escama, "EGRESS_LOCK", str(lock))
+    dentro = []
+
+    def inner(_cfg, _egress, _kind):
+        with open(lock) as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                dentro.append(False)
+            except BlockingIOError:
+                dentro.append(True)
+        return True
+
+    monkeypatch.setattr(escama, "_aplicar_egress", inner)
+    escama.apply_egress({}, "proton0", "vpn")
+    assert dentro == [True], dentro
+
+
+def test_tiene_caps_detecta_el_guard(monkeypatch):
+    """Sin las tres caps no hay guard, aunque la variable diga lo contrario."""
+    monkeypatch.setenv("ESCAMA_VIA_LAUNCHER", "1")
+    monkeypatch.setattr(escama, "_caps_efectivas", lambda: 0)
+    assert escama._tiene_caps_del_launcher() is False
 
 
 def test_probe_y_run_no_divergen_sobre_escalar(monkeypatch):

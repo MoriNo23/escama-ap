@@ -12,6 +12,14 @@ You can expect a response within a few days. If a report is confirmed, a fix
 lands in the next patch release and the advisory is published with credit
 unless you prefer otherwise.
 
+## Privilege boundary
+
+The launcher's network capabilities are scoped to escama's own operations: the
+`core` entry point and the rootless probe (`ip link add|del escv<PID> type
+dummy`). It is not a generic privileged runner. The core recognizes a launcher
+invocation by its effective capabilities (`CapEff`), not by the
+`ESCAMA_VIA_LAUNCHER` environment variable, which any local process can export.
+
 ## Scope
 
 - `opt/escama/escama.py` (core), `opt/escama/escama-tui.py` (TUI)

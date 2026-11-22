@@ -349,6 +349,13 @@ cmd_uninstall() {
     rm -f "$BIN_DIR/escama" "$BIN_DIR/escama-tui"
     rm -f "$OPT_DIR/escama.py" "$OPT_DIR/escama-tui.py"
     for u in $UNITS; do rm -f "$UNIT_DIR/$u"; done
+    udir="$(user_unit_dir)"
+    for u in $USER_UNITS; do
+        if [ -f "$udir/$u" ]; then
+            user_systemctl disable --now "$u" 2>/dev/null || true
+            rm -f "$udir/$u"
+        fi
+    done
     systemctl daemon-reload
     echo "OK: desinstalado. Se conservan $ENV_DST y /var/log/escama-ap.log"
 }
@@ -405,6 +412,17 @@ cmd_status() {
                 "${en:-no-configurado}" "${ac:-inactivo}"
         else
             echo "unit     $u: AUSENTE"
+        fi
+    done
+    d="$(user_unit_dir)"
+    for u in $USER_UNITS; do
+        if [ -f "$d/$u" ]; then
+            en="$(user_systemctl is-enabled "$u" 2>/dev/null || true)"
+            ac="$(user_systemctl is-active "$u" 2>/dev/null || true)"
+            printf 'unit user %s: %s / %s\n' "$u" \
+                "${en:-no-configurado}" "${ac:-inactivo}"
+        else
+            echo "unit user $u: AUSENTE"
         fi
     done
 }

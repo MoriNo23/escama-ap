@@ -10,9 +10,8 @@ por la WAN o por un túnel VPN, con NAT automático.
 
 ![release](https://img.shields.io/github/v/release/MoriNo23/escama-ap)
 ![build](https://img.shields.io/github/actions/workflow/status/MoriNo23/escama-ap/ci.yml?branch=master)
-![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![plataforma](https://img.shields.io/badge/plataforma-Debian%20%2F%20Linux-A81D33?logo=debian&logoColor=white)
-![tests](https://img.shields.io/badge/tests-139%20passing-brightgreen)
 ![config](https://img.shields.io/badge/config-TOML-blue)
 ![licencia](https://img.shields.io/github/license/MoriNo23/escama-ap)
 
@@ -69,8 +68,17 @@ sudo escama rename <iface> <nuevo>   # renombra un adaptador WiFi
 sudo escama autorename               # nombres por defecto (wifi-<4 de MAC>) para WiFi genéricas
 escama preflight          # diagnóstico de la máquina (componentes, versión, perms)
 
-sudo escama-tui           # menú interactivo (whiptail) para editar la config
+escama                    # menú interactivo (whiptail): entrada sugerida
+sudo escama-tui           # el mismo menú, forzado aunque no haya TTY
 ```
+
+## Menú interactivo
+
+`escama` sin argumentos y con terminal abre el menú whiptail. Muestra el estado
+real de AP/WAN/egress, ofrece solo las acciones que tienen sentido en ese
+estado y delega cada mutación en los mismos comandos que se usan desde la shell.
+Sin TTY (scripts, systemd) sigue imprimiendo `status`; sin `whiptail` avisa cómo
+instalarlo y cae a `status`.
 
 ## Configuración
 
@@ -154,7 +162,7 @@ quedan log y confs, para no confundir "no arrancó" con "no tengo permiso".
 ## Testing
 
 ```bash
-python3 -m pytest tests/test_escama.py -q    # 139 tests, ~16 s
+python3 -m pytest tests/test_escama.py -q    # suite completa, ~16 s
 ```
 
 Los tests mockean `run()`/`subprocess`/`os`: nunca tocan las interfaces reales
@@ -164,7 +172,7 @@ testing opcional con `mutmut run` (config en `setup.cfg`).
 ## Requisitos
 
 - Debian/Linux con NetworkManager (`nmcli`)
-- Python 3.10+ — solo stdlib, cero dependencias
+- Python 3.11+ — solo stdlib, cero dependencias (`tomllib`)
 - `hostapd`, `dnsmasq`, `iw`; `whiptail` solo para la TUI
 - `qrencode` — opcional, solo para `escama qr` (`sudo apt install qrencode`;
   sin él el comando imprime el string WIFI y la línea de instalación)

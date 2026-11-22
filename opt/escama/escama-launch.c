@@ -34,13 +34,15 @@
  *
  * Uso: escama-launch <comando> [args...]
  * Whitelist: este launcher NO es un corredor generico de comandos; solo
- * ejecuta el modo `core` (el nucleo escama) y la probe de ip(8) del rootless.
- * Cualquier otro argv[1] se rechaza: darle caps de red a un binario arbitrario
+ * ejecuta el modo `core` (el nucleo escama) y, dentro de ip(8), SOLO la sonda
+ * `link add|del escv<digits> type dummy`. Cualquier otro argv se rechaza:
+ * darle caps de red a un binario arbitrario
  * (`escama-launch /bin/bash`) regalaba una shell privilegiada a cualquier
  * proceso del usuario.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +67,22 @@
 
 static const int escama_cap_list[] = {CAP_NET_ADMIN, CAP_NET_RAW,
                                       CAP_NET_BIND_SERVICE};
+
+/* Unica forma permitida de /usr/bin/ip: la sonda del modo rootless.
+ * argv = [launcher, /usr/bin/ip, link, add|del, escv<PID>, type, dummy]. */
+static int es_sonda_valida(int argc, char **argv)
+{
+    if (argc != 7 || strcmp(argv[2], "link") != 0)
+        return 0;
+    if (strcmp(argv[3], "add") != 0 && strcmp(argv[3], "del") != 0)
+        return 0;
+    if (strncmp(argv[4], "escv", 4) != 0 || !isdigit((unsigned char)argv[4][4]))
+        return 0;
+    for (const char *p = argv[4] + 5; *p; p++)
+        if (!isdigit((unsigned char)*p))
+            return 0;
+    return strcmp(argv[5], "type") == 0 && strcmp(argv[6], "dummy") == 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -149,6 +167,12 @@ int main(int argc, char **argv)
     /* Whitelist: solo el modo "core" y la probe de ip(8) que usa el propio
      * escama (ver cabecera). Todo lo demas se rechaza. */
     if (strcmp(argv[1], "/usr/bin/ip") == 0) {
+        if (!es_sonda_valida(argc, argv)) {
+            fprintf(stderr,
+                    "escama-launch:ip no permitido: solo la sonda "
+                    "`link add|del escv<digits> type dummy`.\n");
+            return 2;
+        }
         execv(argv[1], &argv[1]);
         perror("escama-launch: execv ip");
         return 127;

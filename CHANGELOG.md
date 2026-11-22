@@ -1,3 +1,35 @@
+## 2.4.0 — 2026-11-22
+
+### Agregado
+- **Entrada por defecto con TUI**: `escama` sin argumentos abre el menú
+  interactivo cuando hay TTY; sin TTY sigue imprimiendo `status`. El menú
+  muestra el estado real de AP/WAN/egress, ofrece acciones válidas para ese
+  estado y delega cada mutación en los subcomandos existentes. Sin `whiptail`
+  avisa cómo instalarlo y cae a `status`. La TUI permite navegar y consultar
+  sin sudo: guardar delega con `sudo -n` o falla con mensaje explícito.
+- **`gestion-egress` como capability**: contrato para aplicación serializada,
+  limpieza sin reglas huérfanas y reutilización de los roles efectivos.
+
+### Corregido
+- **Launcher con capabilities acotadas**: solo ejecuta el `core` y la sonda
+  exacta `ip link add|del escv<PID> type dummy`; cualquier otro argv de `ip`
+  se rechaza con rc 2, así que no sirve como ejecutor privilegiado genérico.
+- **Egress reconciliado**: cada regla lleva `--comment escama`, la limpieza lee
+  `iptables-save`/`ip rule` y ya no depende del archivo de estado;
+  `apply_egress` toma un `flock`, verifica el NAT en el kernel antes de
+  anunciar éxito y restaura el `rp_filter` previo.
+- **Roles efectivos**: `start` guarda el AP/WAN detectados en runtime y
+  `stop`, `egress` y `watch` los reutilizan en vez de un TOML desactualizado.
+- **Guard no forjable**: el core verifica `CapEff`; exportar
+  `ESCAMA_VIA_LAUNCHER=1` ya no omite la verificación de rootless.
+- **`install.sh status`** reporta también las user units y `uninstall` las
+  remueve; la documentación nombra `escama.toml` como formato vigente.
+
+### Notas
+- Bump **minor**: se agrega un requisito nuevo compatible (entrada TUI y menú
+  contextual). Los comandos explícitos y el modo sin TTY conservan su
+  comportamiento.
+
 ## 2.3.1 — 2026-11-22
 
 ### Corregido

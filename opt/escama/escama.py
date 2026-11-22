@@ -18,8 +18,11 @@ import syslog
 import subprocess
 import time
 import re
+import shlex
 import shutil
 import tomllib
+import contextlib
+import fcntl
 
 # --- Version ---
 # Fuente UNICA de la version (spec `versionado`): el archivo VERSION de la raiz
@@ -154,6 +157,8 @@ HOSTAPD_CONF = _hostapd_conf()
 DNSMASQ_CONF = _dnsmasq_conf()
 PIDFILE = os.path.join(_runtime_dir(), "dnsmasq-escama.pid")
 STATE_FILE = os.path.join(_runtime_dir(), "escama-egress.state")
+ROLES_FILE = os.path.join(_runtime_dir(), "escama-roles.state")
+EGRESS_LOCK = os.path.join(_runtime_dir(), "escama-egress.lock")
 
 # --- Installation (spec `auto-instalacion`) ---
 # Rutas de la instalacion canonica que produce install.sh. El nucleo solo las
@@ -163,6 +168,8 @@ INSTALL_BIN_DIR = "/usr/local/bin"
 INSTALL_UNIT_DIR = "/etc/systemd/system"
 INSTALL_UNITS = ("escama-ap.service", "escama-egress.service")
 INSTALL_SCRIPT = "install.sh"
+TUI_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                          "escama-tui.py")
 
 # Routing table used to force client traffic into the VPN tunnel.
 ESCAMA_TABLE = "51821"
@@ -246,15 +253,27 @@ def log(msg: str) -> None:
         pass
 
 
-def _tiene_caps_del_launcher() -> bool:
-    """True si el proceso corre bajo escama-launch (ya tiene capabilities).
+def _caps_efectivas() -> int:
+    """CapEff del proceso segun /proc/self/status (0 si no se puede leer)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("CapEff:"):
+                    return int(line.split()[1], 16)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
-    El guard de entorno lo establece _relanzar_rootless() justo antes del
-    execve. Es la señal de que NO hay que escalar: el proceso no es root pero
-    tiene CAP_NET_ADMIN/RAW/BIND_SERVICE, y sudo las perderia (el kernel no
-    concede file capabilities bajo sudo) ademas de pedir password.
+
+def _tiene_caps_del_launcher() -> bool:
+    """True si el proceso ya tiene las capabilities de red del launcher.
+
+    La variable ESCAMA_VIA_LAUNCHER NO alcanza: la puede exportar cualquier
+    proceso. Se comprueba CapEff — el kernel solo se las da al core invocado
+    por el launcher (o a root, que ya pasa por otra rama).
     """
-    return os.environ.get("ESCAMA_VIA_LAUNCHER") == "1"
+    mask = ((1 << 10) | (1 << 12) | (1 << 13))  # BIND_SERVICE, ADMIN, RAW
+    return (_caps_efectivas() & mask) == mask
 
 
 def run(cmd, capture=True, ro=False):
@@ -663,10 +682,10 @@ def resolve_egress(cfg: dict) -> tuple:
     return (wan, "wan") if wan else ("", "none")
 
 
-def _read_state() -> dict:
+def _leer_archivo(ruta: str) -> dict:
     st = {}
     try:
-        with open(STATE_FILE) as f:
+        with open(ruta) as f:
             for line in f:
                 if "=" in line:
                     k, v = line.strip().split("=", 1)
@@ -676,14 +695,103 @@ def _read_state() -> dict:
     return st
 
 
-def _write_state(**kw) -> None:
+def _escribir_archivo(ruta: str, **kw) -> None:
+    """Escritura atomica: el lector nunca ve un archivo a medio escribir."""
+    tmp = ""
     try:
-        os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
-        with open(STATE_FILE, "w") as f:
+        os.makedirs(os.path.dirname(ruta) or ".", exist_ok=True)
+        tmp = f"{ruta}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
             for k, v in kw.items():
                 f.write(f"{k}={v}\n")
+        os.replace(tmp, ruta)
     except OSError:
-        pass
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _read_state() -> dict:
+    return _leer_archivo(STATE_FILE)
+
+
+def _write_state(**kw) -> None:
+    _escribir_archivo(STATE_FILE, **kw)
+
+
+def _guardar_roles(cfg: dict) -> None:
+    """Los roles efectivos de `start` son estado, no configuracion del usuario."""
+    _escribir_archivo(ROLES_FILE, AP_IFACE=cfg.get("AP_IFACE", ""),
+                      WAN_IFACE=cfg.get("WAN_IFACE", ""))
+
+
+def _roles_efectivos(cfg: dict) -> dict:
+    roles = _leer_archivo(ROLES_FILE)
+    out = dict(cfg)
+    for k in ("AP_IFACE", "WAN_IFACE"):
+        valor = roles.get(k, "")
+        if valor and iface_exists(valor):
+            out[k] = valor
+    return out
+
+
+@contextlib.contextmanager
+def _egress_lock():
+    """Serializa `watch` y `egress` dentro de un mismo modo de runtime."""
+    try:
+        os.makedirs(os.path.dirname(EGRESS_LOCK) or ".", exist_ok=True)
+        f = open(EGRESS_LOCK, "a")
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
+
+
+def _reglas_iptables(tabla: str) -> list:
+    """Reglas propias presentes en el kernel, marcadas con `--comment escama`."""
+    r = run(["iptables-save", "-t", tabla], capture=True, ro=True)
+    if not r or r.returncode != 0:
+        return []
+    reglas = []
+    for linea in (r.stdout or "").splitlines():
+        if not linea.startswith("-A ") or "escama" not in linea:
+            continue
+        try:
+            partes = shlex.split(linea)
+        except ValueError:
+            continue
+        partes[0] = "-D"
+        reglas.append(partes)
+    return reglas
+
+
+def _prefs_policy() -> list:
+    r = run(["ip", "rule", "show"], capture=True, ro=True)
+    if not r or r.returncode != 0:
+        return []
+    prefs = []
+    for linea in (r.stdout or "").splitlines():
+        m = re.match(r"\s*(\d+):.*lookup\s+" + re.escape(ESCAMA_TABLE), linea)
+        if m and m.group(1) not in prefs:
+            prefs.append(m.group(1))
+    return prefs
+
+
+def _verificar_egress(cfg: dict, egress: str, kind: str) -> bool:
+    if not egress:
+        return True
+    if not any("MASQUERADE" in r and egress in r
+               for r in _reglas_iptables("nat")):
+        log(f"WARN: no se verificó la regla NAT hacia {egress}")
+        return False
+    return True
 
 
 def _clear_state() -> None:
@@ -704,6 +812,14 @@ def clear_egress(cfg: dict, egress: str = "", kind: str = "") -> None:
     kind = kind or st.get("KIND", "")
     subnet = cfg["AP_SUBNET"]
     ap = cfg["AP_IFACE"]
+
+    # Reconciliación desde el kernel: encuentra reglas propias aunque el state
+    # file haya desaparecido, esté viejo o apunte a otra interfaz.
+    for tabla in ("nat", "filter", "mangle"):
+        for regla in _reglas_iptables(tabla):
+            run(["iptables", "-t", tabla] + regla)
+    for pref in _prefs_policy():
+        run(["ip", "rule", "del", "pref", pref])
 
     candidates = {c for c in (egress, cfg.get("WAN_IFACE") or "") if c}
     for out in candidates:
@@ -741,10 +857,19 @@ def clear_egress(cfg: dict, egress: str = "", kind: str = "") -> None:
         if not r or r.returncode != 0:
             break
     run(["ip", "route", "flush", "table", ESCAMA_TABLE])
+    filtro = st.get("RP_FILTER", "")
+    if filtro in ("0", "1", "2"):
+        run(["sysctl", "-w", f"net.ipv4.conf.{ap}.rp_filter={filtro}"])
     _clear_state()
 
 
-def apply_egress(cfg: dict, egress: str, kind: str) -> None:
+def apply_egress(cfg: dict, egress: str, kind: str) -> bool:
+    """Aplica el egress bajo lock; True solo si se verificó en el kernel."""
+    with _egress_lock():
+        return _aplicar_egress(cfg, egress, kind)
+
+
+def _aplicar_egress(cfg: dict, egress: str, kind: str) -> bool:
     """Install forwarding + NAT (+ policy routing / MSS clamp) toward `egress`."""
     subnet = cfg["AP_SUBNET"]
     ap = cfg["AP_IFACE"]
@@ -754,6 +879,9 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
     # restaura en vez de apagarlo en global y romper el NAT del host.
     prev = run(["sysctl", "-n", "net.ipv4.ip_forward"], capture=True, ro=True)
     ipfwd_prev = (prev.stdout or "").strip() if prev else ""
+    prev_rp = run(["sysctl", "-n", f"net.ipv4.conf.{ap}.rp_filter"],
+                  capture=True, ro=True)
+    rp_prev = (prev_rp.stdout or "").strip() if prev_rp else ""
     clear_egress(cfg)
     run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
 
@@ -761,19 +889,23 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
         # fail-closed: sin salida valida, no dejamos fugar por WAN
         if wan:
             run(["iptables", "-A", "FORWARD", "-i", ap, "-o", wan,
-                 "-s", subnet, "-j", "REJECT"])
-        _write_state(EGRESS="", KIND="none", IPFWD=ipfwd_prev)
+                 "-s", subnet, "-m", "comment", "--comment", "escama",
+                 "-j", "REJECT"])
+        _write_state(EGRESS="", KIND="none", IPFWD=ipfwd_prev,
+                     RP_FILTER=rp_prev)
         log("WARN: sin egress valido; clientes SIN internet (fail-closed)")
-        return
+        return True
 
     # NAT + forward
     run(["iptables", "-t", "nat", "-A", "POSTROUTING",
-         "-o", egress, "-s", subnet, "-j", "MASQUERADE"])
+         "-o", egress, "-s", subnet, "-m", "comment", "--comment", "escama",
+         "-j", "MASQUERADE"])
     run(["iptables", "-A", "FORWARD", "-i", ap, "-o", egress,
-         "-s", subnet, "-j", "ACCEPT"])
+         "-s", subnet, "-m", "comment", "--comment", "escama",
+         "-j", "ACCEPT"])
     run(["iptables", "-A", "FORWARD", "-i", egress, "-o", ap,
          "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
-         "-j", "ACCEPT"])
+         "-m", "comment", "--comment", "escama", "-j", "ACCEPT"])
 
     if kind == "vpn":
         # rp_filter loose SOLO en la iface del AP: el kernel usa
@@ -784,6 +916,7 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
         if _yes(cfg.get("VPN_MSS_CLAMP", "yes")):
             run(["iptables", "-t", "mangle", "-A", "FORWARD", "-o", egress,
                  "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+                 "-m", "comment", "--comment", "escama",
                  "-j", "TCPMSS", "--clamp-mss-to-pmtu"])
 
         if _yes(cfg.get("VPN_FORCE_ROUTE", "yes")):
@@ -827,11 +960,17 @@ def apply_egress(cfg: dict, egress: str, kind: str) -> None:
         # kill-switch: nada del AP puede escaparse por la WAN en claro
         if wan and wan != egress:
             run(["iptables", "-A", "FORWARD", "-i", ap, "-o", wan,
-                 "-s", subnet, "-j", "REJECT"])
+                 "-s", subnet, "-m", "comment", "--comment", "escama",
+                 "-j", "REJECT"])
 
     _write_state(EGRESS=egress, KIND=kind, AP=ap, SUBNET=subnet, WAN=wan,
-                 IPFWD=ipfwd_prev)
-    log(f"Egress aplicado: {egress} (modo={kind}, mtu={iface_mtu(egress)})")
+                 IPFWD=ipfwd_prev, RP_FILTER=rp_prev)
+    ok = _verificar_egress(cfg, egress, kind)
+    if ok:
+        log(f"Egress aplicado: {egress} (modo={kind}, mtu={iface_mtu(egress)})")
+    else:
+        log(f"ERROR: egress {egress} no verificado en el kernel")
+    return ok
 
 
 def _yes(v) -> bool:
@@ -1076,6 +1215,9 @@ def do_start() -> int:
     ap_nuevo = _autorename_ap_si_corresponde(cfg)
     if ap_nuevo:
         ap = ap_nuevo
+    cfg["AP_IFACE"] = ap
+    cfg["WAN_IFACE"] = wan
+    _guardar_roles(cfg)
 
     # free iface from NM (AP iface only)
     # Quitarle la iface al gestor de red: sin esto NetworkManager puede
@@ -1140,7 +1282,7 @@ def do_start() -> int:
 
 
 def do_stop() -> int:
-    cfg = load_env()
+    cfg = _roles_efectivos(load_env())
     ap = cfg["AP_IFACE"]
     wan = cfg["WAN_IFACE"]
     # Leer el forwarding guardado ANTES de clear_egress (borra el state).
@@ -1161,23 +1303,42 @@ def do_stop() -> int:
     return 0
 
 
+def estado_escama(cfg: dict = None) -> dict:
+    """Estado estructurado compartido por `status` y la TUI (sin duplicar reglas)."""
+    cfg = cfg if cfg is not None else load_env()
+    ap, wan = cfg["AP_IFACE"], cfg["WAN_IFACE"]
+    p = run(["iw", "dev", ap, "info"], capture=True, ro=True)
+    up = bool(p) and p.returncode == 0 and "type AP" in (p.stdout or "")
+    egress, kind = resolve_egress(cfg)
+    return {
+        "ap": ap,
+        "wan": wan,
+        "ssid": cfg["SSID"],
+        "ip": f"{cfg['AP_IP']}/{cfg['AP_CIDR']}",
+        "up": up,
+        "egress": egress,
+        "kind": kind,
+        "aplicado": _read_state().get("EGRESS"),
+        "modo": "root" if os.geteuid() == 0 else "rootless",
+        "tunnels": [t for t in list_tunnels() if iface_is_up(t)],
+    }
+
+
 def do_status() -> int:
     cfg = load_env()
-    ap = cfg["AP_IFACE"]
-    wan = cfg["WAN_IFACE"]
+    e = estado_escama(cfg)
+    ap, wan = e["ap"], e["wan"]
     print(f"=== escama AP Status ===")
     print(f"AP iface:    {ap}")
     print(f"WAN iface:   {wan}")
-    p = run(["iw", "dev", ap, "info"], capture=True, ro=True)
-    if p is not None and p.returncode == 0 and "type AP" in (p.stdout or ""):
+    if e["up"]:
         print("Modo:        AP (activo)")
-        print(f"IP:          {cfg['AP_IP']}/{cfg['AP_CIDR']}")
-        print(f"SSID:        {cfg['SSID']}")
+        print(f"IP:          {e['ip']}")
+        print(f"SSID:        {e['ssid']}")
     else:
         print("Modo:        CLIENTE (AP inactivo)")
-    egress, kind = resolve_egress(cfg)
-    st = _read_state()
-    tunnels = [t for t in list_tunnels() if iface_is_up(t)]
+    egress, kind = e["egress"], e["kind"]
+    tunnels = e["tunnels"]
     print(f"Egress mode: {cfg.get('EGRESS_MODE', 'auto')}")
     print(f"Tunnels up:  {', '.join(tunnels) if tunnels else '(ninguno)'}")
     if kind == "vpn":
@@ -1186,7 +1347,7 @@ def do_status() -> int:
         print(f"Salida:      WAN {egress} (sin VPN)")
     else:
         print("Salida:      NINGUNA (fail-closed, clientes sin internet)")
-    applied = st.get("EGRESS")
+    applied = e["aplicado"]
     if applied is not None and applied != egress:
         print(f"AVISO:       reglas aplicadas apuntan a '{applied or '(ninguna)'}'"
               f" != salida actual '{egress or '(ninguna)'}'."
@@ -1226,7 +1387,7 @@ def do_egress(args: list = None) -> int:
     Pensado para correr cuando conectas/desconectas ProtonVPN o warp-cli:
     los clientes no pierden la asociacion WiFi, solo cambia por donde salen.
     """
-    cfg = load_env()
+    cfg = _roles_efectivos(load_env())
     args = args or []
     if args:
         sel = args[0].strip().lower()
@@ -1236,26 +1397,28 @@ def do_egress(args: list = None) -> int:
             cfg["EGRESS_MODE"] = "vpn"
             cfg["VPN_IFACE"] = args[0].strip()
     egress, kind = _egress_valido(cfg)
-    apply_egress(cfg, egress, kind)
+    ok = apply_egress(cfg, egress, kind)
     # DNS/MTU de los clientes cambian con el tunnel -> regenerar SOLO dnsmasq.
     # hostapd no se toca: el canal del AP debe quedar estable en vivo.
     generar_dnsmasq(cfg, kind)
     _hup_dnsmasq()
-    return 0 if egress else 1
+    return 0 if egress and ok else 1
 
 
 def do_watch(interval: int = 5) -> int:
     """Daemon loop: follow VPN up/down and swap egress on the fly."""
-    cfg = load_env()
+    cfg = _roles_efectivos(load_env())
     log(f"watch: vigilando tunnels cada {interval}s "
         f"(modo={cfg.get('EGRESS_MODE', 'auto')})")
     last = None
     while True:
-        cfg = load_env()
+        cfg = _roles_efectivos(load_env())
         egress, kind = _egress_valido(cfg)
         if (egress, kind) != last:
             log(f"watch: cambio de salida -> {egress or '(ninguna)'} ({kind})")
-            apply_egress(cfg, egress, kind)
+            if not apply_egress(cfg, egress, kind):
+                time.sleep(interval)
+                continue
             # solo dnsmasq: NUNCA regenerar hostapd aqui (canal estable)
             generar_dnsmasq(cfg, kind)
             _hup_dnsmasq()
@@ -1852,15 +2015,17 @@ def _bootstrap_instalacion() -> bool:
 # --- Gate de privilegio (spec `uso-sin-privilegios`) ---
 # El gate NO es global: las acciones de solo lectura corren sin privilegio y las
 # que mutan el sistema requieren root o el launcher rootless (fase 2 del change).
-ACCIONES_SIN_PRIVILEGIO = ("status", "qr", "--help", "-h", "help", "--version",
-                           "-v", "version", "preflight")
+ACCIONES_SIN_PRIVILEGIO = ("status", "qr", "tui", "--help", "-h", "help",
+                           "--version", "-v", "version", "preflight")
 ACCIONES_CON_BOOTSTRAP = ("start", "stop", "restart", "reconnect", "genconfig",
                           "egress", "watch")
 
 
 def main(args: list = None) -> int:
     argv = args if args is not None else sys.argv[1:]
-    action = argv[0] if len(argv) > 0 else "status"
+    if not argv:
+        argv = ["tui"] if _is_tty() else ["status"]
+    action = argv[0]
 
     # Auto-instalacion (spec `auto-instalacion`): antes de una accion que muta el
     # sistema, si falta la instalacion se ofrece completarla. Sin TTY no se
@@ -1877,7 +2042,7 @@ def main(args: list = None) -> int:
         # con capabilities y sin sudo (spec `uso-sin-privilegios`). El guard de
         # entorno evita el ciclo de re-ejecucion: si ya venimos del launcher, el
         # proceso tiene las capabilities y no debe volver a re-lanzarse.
-        if os.environ.get("ESCAMA_VIA_LAUNCHER") == "1":
+        if _tiene_caps_del_launcher():
             pass  # ya estamos en modo rootless: seguir con la accion
         else:
             ok, motivo = rootless_disponible()
@@ -1927,6 +2092,12 @@ def main(args: list = None) -> int:
         do_stop()
         time.sleep(1)
         return do_start()
+    elif action == "tui":
+        try:
+            p = subprocess.run([sys.executable, TUI_SCRIPT], check=False)
+        except OSError:
+            return do_status()
+        return p.returncode if p else 1
     elif action == "status":
         return do_status()
     elif action == "qr":

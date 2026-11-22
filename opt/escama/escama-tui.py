@@ -11,6 +11,7 @@ Uso: sudo escama-tui.py
 import os
 import sys
 import subprocess
+import tempfile
 import time
 import ipaddress
 
@@ -20,10 +21,6 @@ import escama
 CONFIG_FILE = escama.CONFIG_FILE
 
 import shutil
-
-if not shutil.which("whiptail"):
-    print("ERROR: whiptail no instalado. sudo apt install whiptail", file=sys.stderr)
-    sys.exit(1)
 
 
 def list_ifaces():
@@ -37,9 +34,13 @@ def list_ifaces():
     return out
 
 
-def whiptail_menu(title, text, items, height=18, width=70, menu_h=9):
-    cmd = ["whiptail", "--clear", "--backtitle", "escama-ap",
-           "--title", title, "--menu", text, str(height), str(width), str(menu_h)] + items
+def whiptail_menu(title, text, items, height=18, width=70, menu_h=9,
+                  default=None):
+    cmd = ["whiptail", "--clear", "--backtitle", "escama-ap"]
+    if default:
+        cmd += ["--default-item", str(default)]
+    cmd += ["--title", title, "--menu", text, str(height), str(width),
+            str(menu_h)] + items
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         return None
@@ -98,6 +99,79 @@ def _recalcular_dhcp(cfg: dict) -> None:
     cfg["DHCP_END"] = str(ipaddress.ip_address(int(red.broadcast_address) - 1))
 
 
+def construir_menu(estado: dict) -> tuple:
+    """Menú principal contextual: estado real, acciones válidas y sugerencia."""
+    texto = (f"AP {estado['ap']} ({estado['ip']}) - "
+             f"{'ACTIVO' if estado['up'] else 'INACTIVO'}\n"
+             f"WAN {estado['wan']} | salida {estado['kind']} "
+             f"{estado['egress'] or '(ninguna)'} | modo {estado['modo']}\n"
+             f"SSID: {estado['ssid']}")
+    items = [
+        "1", "Arrancar AP" if not estado["up"] else "Parar AP",
+        "2", "Ver estado",
+        "3", "QR para el telefono",
+        "4", "Cambiar salida (VPN/WAN)",
+        "5", "Preflight de la maquina",
+        "C", "Configurar SSID, interfaces, canal, passphrase...",
+        "R", "Renombrar adaptador WiFi",
+        "E", "Editar TOML en $EDITOR",
+        "X", "Salir (sin guardar cambios)",
+    ]
+    return texto, items, "1" if not estado["up"] else "2"
+
+
+def accion_rapida(choice: str, estado: dict) -> None:
+    """Delega la acción en el subcomando de escama y muestra el resultado real."""
+    comandos = {
+        "1": ["escama", "start" if not estado["up"] else "stop"],
+        "2": ["escama", "status"],
+        "3": ["escama", "qr"],
+        "4": ["escama", "egress"],
+        "5": ["escama", "preflight"],
+    }
+    cmd = comandos.get(choice)
+    if not cmd:
+        return
+    p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    salida = ((p.stdout or "") + (p.stderr or "")).strip() or "Accion terminada."
+    subprocess.run(["whiptail", "--msgbox", salida[-2000:], "20", "74"],
+                   check=False)
+
+
+def guardar_config(cfg: dict) -> bool:
+    """Escribe el TOML con privilegio suficiente; si no puede, lo dice.
+
+    Sin root, `save_config` trabaja sobre un temporal (conserva comentarios) y
+    `sudo -n install` lo coloca en su sitio. Sin sudo silencioso no se toca el
+    archivo del usuario y se devuelve False para no anunciar éxito falso.
+    """
+    destino = escama.CONFIG_FILE
+    if os.geteuid() == 0:
+        escama.save_config(cfg)
+        return True
+    temporal = os.path.join(tempfile.gettempdir(),
+                            f"escama-toml-{os.getpid()}.toml")
+    try:
+        escama.CONFIG_FILE = temporal
+        escama.save_config(cfg)
+    finally:
+        escama.CONFIG_FILE = destino
+    try:
+        p = subprocess.run(["sudo", "-n", "install", "-m", "644",
+                            temporal, destino], check=False)
+    except OSError:
+        p = None
+    if p is None or p.returncode != 0:
+        subprocess.run(["whiptail", "--msgbox",
+                        "No pude escribir la configuracion sin privilegio.\n"
+                        "El archivo quedo sin cambios. Guardalo con:\n"
+                        f"  sudo escama-tui\n"
+                        "o copiá el temporal a mano.", "10", "60"],
+                       check=False)
+        return False
+    return True
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h", "help"):
         print("escama-tui - TUI de configuracion para escama-ap")
@@ -108,17 +182,29 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v", "version"):
         print(f"escama-tui {read_version()}")
         sys.exit(0)
-    # Gate por accion (spec `uso-sin-privilegios`): --help/--version ya salie-
-    # ron; el menu lee la config pero escribir TOML en /etc/escama requiere
-    # privilegio, asi que el gate queda para el resto.
-    if os.geteuid() != 0:
-        print("Editar la configuracion necesita privilegio.\n"
-              "  Ejecutalo con sudo:  sudo escama-tui\n"
-              "  (--help y --version funcionan sin sudo)", file=sys.stderr)
-        sys.exit(1)
+    if not shutil.which("whiptail"):
+        print("ERROR: whiptail no instalado. sudo apt install whiptail",
+              file=sys.stderr)
+        return escama.do_status()
+    # Navegacion y consultas sin privilegio (spec `uso-sin-privilegios`).
+    # Solo guardar exige root: guardar_config() delega o degrada explicitamente.
     cfg = escama.load_env()
+    salir_sin_guardar = False
     while True:
-        choice = whiptail_menu(
+        estado = escama.estado_escama(cfg)
+        texto, items, sugerido = construir_menu(estado)
+        principal = whiptail_menu("escama-ap", texto, items, 21, 74, 13,
+                                  default=sugerido)
+        if principal is None or principal == "X":
+            salir_sin_guardar = True
+            break
+        if principal in ("R", "E"):
+            choice = principal
+        elif principal != "C":
+            accion_rapida(principal, estado)
+            continue
+        else:
+            choice = whiptail_menu(
             "escama-ap Config",
             "Elige que configurar:",
             ["1", f"Interfaz AP: {cfg['AP_IFACE']}",
@@ -234,7 +320,10 @@ def main():
                 else:
                     cfg["VPN_DNS1"] = cfg["VPN_DNS2"] = v.strip()
 
-    escama.save_config(cfg)
+    if salir_sin_guardar:
+        return 0
+    if not guardar_config(cfg):
+        sys.exit(1)
     # regenerar confs
     subprocess.run(["escama", "genconfig"], check=False)
     # feedback de aplicación

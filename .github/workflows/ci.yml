@@ -88,6 +88,22 @@ jobs:
           ./escama-launch /bin/true 2>salida.txt && exit 1 || rc=$?
           test "$rc" = 2
           grep -q "comando no permitido" salida.txt
+      - name: "Sondas rootless concurrentes (20 iteraciones)"
+        # reproduce el escenario del boot: dos unidades crean su dummy a la vez
+        run: |
+          set -e
+          for i in $(seq 1 20); do
+            a=$((1000 + i))
+            b=$((2000 + i))
+            ./escama-launch /usr/bin/ip link add escv$a type dummy &
+            p1=$!
+            ./escama-launch /usr/bin/ip link add escv$b type dummy &
+            p2=$!
+            wait "$p1"
+            wait "$p2"
+            ./escama-launch /usr/bin/ip link del escv$a type dummy
+            ./escama-launch /usr/bin/ip link del escv$b type dummy
+          done
       - name: Publicar el binario
         uses: actions/upload-artifact@v7
         with:
