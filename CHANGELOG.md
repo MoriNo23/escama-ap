@@ -1,3 +1,15 @@
+## 2.5.1 — 2026-11-22
+
+### Corregido
+- **Roles viejos ya no pisan la config**: `escama-roles.state` guarda la firma
+  de la configuración que lo originó. Si `WAN_IFACE` cambia —por ejemplo a
+  `""` con WAN AUTO— los roles anteriores se ignoran. Antes podían hacer que
+  `egress` reaplicara NAT por el AP o por un adaptador caído.
+- **`status` con WAN AUTO**: re-detecta la salida igual que `egress`, en vez de
+  mostrar "NINGUNA" y un aviso falso de reglas desincronizadas.
+- Bump **patch**: corrige comportamientos que ya violaban el contrato de
+  egress verificado.
+
 ## 2.5.0 — 2026-11-22
 
 ### Agregado

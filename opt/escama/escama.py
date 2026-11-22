@@ -749,15 +749,25 @@ def _write_state(**kw) -> None:
     _escribir_archivo(STATE_FILE, **kw)
 
 
-def _guardar_roles(cfg: dict) -> None:
-    """Los roles efectivos de `start` son estado, no configuracion del usuario."""
+def _guardar_roles(cfg: dict, cfg_ap: str, cfg_wan: str) -> None:
+    """Guarda roles efectivos junto a la config que los origino.
+
+    Sin esa firma, un roles.state viejo puede pisar un WAN_IFACE="" nuevo y
+    hacer que `egress` reaplique NAT por la interfaz equivocada (medido).
+    """
     _escribir_archivo(ROLES_FILE, AP_IFACE=cfg.get("AP_IFACE", ""),
-                      WAN_IFACE=cfg.get("WAN_IFACE", ""))
+                      WAN_IFACE=cfg.get("WAN_IFACE", ""),
+                      CFG_AP=cfg_ap, CFG_WAN=cfg_wan)
 
 
 def _roles_efectivos(cfg: dict) -> dict:
     roles = _leer_archivo(ROLES_FILE)
     out = dict(cfg)
+    if "CFG_AP" not in roles or "CFG_WAN" not in roles:
+        return out  # archivo de una version anterior: no es de confianza
+    if (roles["CFG_AP"] != (cfg.get("AP_IFACE") or "").strip() or
+            roles["CFG_WAN"] != (cfg.get("WAN_IFACE") or "").strip()):
+        return out  # la config cambio a proposito: gana la config actual
     for k in ("AP_IFACE", "WAN_IFACE"):
         valor = roles.get(k, "")
         if valor and iface_exists(valor):
@@ -1195,6 +1205,8 @@ def _ensure_ip(ap: str, ip_addr: str, cidr: str) -> None:
 
 def do_start() -> int:
     cfg = load_env()
+    cfg_ap_inicial = (cfg.get("AP_IFACE") or "").strip()
+    cfg_wan_inicial = (cfg.get("WAN_IFACE") or "").strip()
     # El repo ya no trae passphrase (es publico): sin ella no se levanta ni un
     # AP abierto ni uno reusando una contrasena vieja del historial de git.
     if not (cfg.get("WPA_PASSPHRASE") or "").strip():
@@ -1245,7 +1257,7 @@ def do_start() -> int:
         ap = ap_nuevo
     cfg["AP_IFACE"] = ap
     cfg["WAN_IFACE"] = wan
-    _guardar_roles(cfg)
+    _guardar_roles(cfg, cfg_ap_inicial, cfg_wan_inicial)
 
     # free iface from NM (AP iface only)
     # Quitarle la iface al gestor de red: sin esto NetworkManager puede
@@ -1337,7 +1349,7 @@ def estado_escama(cfg: dict = None) -> dict:
     ap, wan = cfg["AP_IFACE"], cfg["WAN_IFACE"]
     p = run(["iw", "dev", ap, "info"], capture=True, ro=True)
     up = bool(p) and p.returncode == 0 and "type AP" in (p.stdout or "")
-    egress, kind = resolve_egress(cfg)
+    egress, kind = _egress_valido(cfg)
     return {
         "ap": ap,
         "wan": wan,

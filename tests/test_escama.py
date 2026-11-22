@@ -774,10 +774,33 @@ def test_clear_egress_sin_state_reconcilia_desde_kernel(monkeypatch, tmp_path):
     assert ["ip", "rule", "del", "pref", "100"] in llamadas
 
 
+def test_roles_viejos_no_pisan_config_actual(monkeypatch, tmp_path):
+    """Un roles.state de otra config no debe tapar WAN_IFACE='' (AUTO)."""
+    roles = tmp_path / "roles"
+    roles.write_text("AP_IFACE=stonepi\nWAN_IFACE=stonepi\n"
+                     "CFG_AP=stonepi\nCFG_WAN=WU900\n")
+    monkeypatch.setattr(escama, "ROLES_FILE", str(roles))
+    cfg = dict(escama.DEFAULTS, AP_IFACE="stonepi", WAN_IFACE="")
+    assert escama._roles_efectivos(cfg)["WAN_IFACE"] == ""
+
+
+def test_estado_escama_redetecta_wan_vacio(monkeypatch):
+    cfg = dict(escama.DEFAULTS, AP_IFACE="stonepi", WAN_IFACE="",
+               SSID="escama")
+    monkeypatch.setattr(escama, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "type AP", "stderr": ""})())
+    monkeypatch.setattr(escama, "_egress_valido",
+                        lambda c: ("WU900-2", "wan"))
+    monkeypatch.setattr(escama, "list_tunnels", lambda: [])
+    st = escama.estado_escama(cfg)
+    assert st["egress"] == "WU900-2" and st["kind"] == "wan"
+
+
 def test_roles_efectivos_para_stop(monkeypatch, tmp_path):
     """stop debe usar los roles que start detectó, no el TOML viejo."""
     roles = tmp_path / "roles"
-    roles.write_text("AP_IFACE=wifi-usb\nWAN_IFACE=wan-real\n")
+    roles.write_text("AP_IFACE=wifi-usb\nWAN_IFACE=wan-real\n"
+                     "CFG_AP=stonepi\nCFG_WAN=vieja\n")
     monkeypatch.setattr(escama, "ROLES_FILE", str(roles))
     monkeypatch.setattr(escama, "STATE_FILE", str(tmp_path / "state"))
     monkeypatch.setattr(escama, "load_env", lambda: dict(
@@ -823,7 +846,7 @@ def test_estado_escama_expone_estado_real(monkeypatch):
     monkeypatch.setattr(escama, "load_env", lambda: cfg)
     monkeypatch.setattr(escama, "run", lambda *a, **k: type(
         "R", (), {"returncode": 0, "stdout": "type AP", "stderr": ""})())
-    monkeypatch.setattr(escama, "resolve_egress", lambda c: ("proton0", "vpn"))
+    monkeypatch.setattr(escama, "_egress_valido", lambda c: ("proton0", "vpn"))
     monkeypatch.setattr(escama, "list_tunnels", lambda: ["proton0"])
     monkeypatch.setattr(escama, "iface_is_up", lambda _i: True)
     monkeypatch.setattr(escama, "_read_state", lambda: {"EGRESS": "proton0"})
