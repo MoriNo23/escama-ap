@@ -1724,7 +1724,18 @@ ESCAMA_CAPS = ("cap_net_admin", "cap_net_raw", "cap_net_bind_service")
 # file capabilities si el argumento contiene "cap-" o "rootless-" con
 # "Attribute failed policy validation" (medido). Un nombre corto y neutro lo
 # evita sin cambiar lo que la prueba verifica.
-PROBE_IFACE = "escama-verify"
+PROBE_IFACE_PREFIX = "escv"
+
+
+def _probe_iface() -> str:
+    """Nombre unico por proceso para la dummy de la sonda.
+
+    Dos invocaciones concurrentes (escama-ap y escama-egress al boot) no deben
+    competir por la misma iface: el `ip link add` perdedor recibe EEXIST y se
+    confundiria con falta de capabilities. Prefijo neutro por el LSM; <=15
+    chars por IFNAMSIZ.
+    """
+    return f"{PROBE_IFACE_PREFIX}{os.getpid()}"
 
 
 def _run_sin_sudo(cmd) -> int:
@@ -1769,10 +1780,11 @@ def rootless_disponible() -> tuple:
     # queda una dummy huerfana de una corrida fallida, el `ip link add` siguiente
     # falla con "File exists" y el rootless pareceria no disponible para siempre
     # (medido: asi se manifesto un falso negativo).
-    _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "del", PROBE_IFACE])
-    rc = _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "add", PROBE_IFACE,
+    iface = _probe_iface()
+    _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "del", iface])
+    rc = _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "add", iface,
                         "type", "dummy"])
-    _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "del", PROBE_IFACE])
+    _run_sin_sudo([LAUNCHER, "/usr/bin/ip", "link", "del", iface])
     if rc != 0:
         return False, ("las capabilities no sobreviven al execve del launcher "
                        "(filesystem sin soporte de xattrs, o tmpfs)")

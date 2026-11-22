@@ -134,6 +134,13 @@ int main(int argc, char **argv)
             perror("escama-launch: setenv PATH");
             return 1;
         }
+        /* El core ya viene con capabilities: no debe re-verificar rootless
+         * (crearia otra dummy y competiria con la unit que arranca en
+         * paralelo). Mismo guard que usa _relanzar_rootless(). */
+        if (setenv("ESCAMA_VIA_LAUNCHER", "1", 1) != 0) {
+            perror("escama-launch: setenv ESCAMA_VIA_LAUNCHER");
+            return 1;
+        }
         execv(ESCAMA_PYTHON, nuevo);
         perror("escama-launch: execv python");
         return 127;

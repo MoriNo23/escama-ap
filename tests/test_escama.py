@@ -1334,9 +1334,36 @@ def test_rootless_verifica_con_operacion_real(tmp_path, monkeypatch):
     assert ok is True
     # debe limpiar antes, crear (la prueba) y borrar despues
     ops = [" ".join(c) for c in llamadas]
-    assert any("link del" in o and escama.PROBE_IFACE in o for o in ops), ops
+    assert any("link del" in o and escama.PROBE_IFACE_PREFIX in o
+               for o in ops), ops
     assert any("link add" in o and "dummy" in o for o in ops), ops
     assert ops[-1].count("link del") >= 1, "la probe debe limpiar al final"
+
+
+def test_probe_usa_iface_unica_por_proceso(tmp_path, monkeypatch):
+    """Dos probes concurrentes no deben pelear por la misma dummy.
+
+    El arranque real dispara escama-ap y escama-egress a la vez; con una
+    iface fija, el `ip link add` del segundo recibe EEXIST y se interpreta
+    como falta de capabilities (falso negativo medido en boot).
+    """
+    p = tmp_path / "escama-launch"
+    p.write_text("x")
+    os.chmod(p, 0o755)
+    monkeypatch.setattr(escama, "LAUNCHER", str(p))
+    monkeypatch.setattr(escama.os, "geteuid", lambda: _EUID)
+    llamadas = []
+    monkeypatch.setattr(escama, "_run_sin_sudo",
+                        lambda cmd: llamadas.append(list(cmd)) or 0)
+    pids = iter([101, 202])
+    monkeypatch.setattr(escama.os, "getpid", lambda: next(pids))
+    assert escama.rootless_disponible()[0] is True
+    assert escama.rootless_disponible()[0] is True
+    adds = [c for c in llamadas if "add" in c]
+    assert len(adds) == 2, llamadas
+    nombres = [c[c.index("add") + 1] for c in adds]
+    assert nombres == ["escv101", "escv202"], adds
+    assert all(len(n) <= 15 for n in nombres)
 
 
 def test_rootless_falla_si_la_operacion_no_pasa(tmp_path, monkeypatch):
@@ -1390,6 +1417,18 @@ def test_relaunch_marca_el_guard_de_entorno(monkeypatch):
         src = f.read()
     assert "ESCAMA_VIA_LAUNCHER" in src, "falta el guard anti-ciclo"
     assert '"core"' in src, "el re-lanzado debe usar el modo core del launcher"
+
+
+def test_launcher_marca_guard_para_core():
+    """El launcher debe marcar el guard antes de exec: el core invocado por
+    systemd ya tiene capabilities y no debe re-verificar rootless (creaba una
+    dummy en cada arranque y competia con la otra unit)."""
+    p = os.path.join(RAIZ_REPO, "opt", "escama", "escama-launch.c")
+    with open(p) as f:
+        src = f.read()
+    assert 'setenv("ESCAMA_VIA_LAUNCHER", "1", 1)' in src
+    assert src.index('setenv("ESCAMA_VIA_LAUNCHER"') < src.index(
+        "execv(ESCAMA_PYTHON")
 
 
 def test_preflight_reporta_rootless(monkeypatch, capsys):

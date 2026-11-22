@@ -1,3 +1,15 @@
+## 2.3.1 — 2026-11-22
+
+### Corregido
+- **Carrera de la sonda rootless al boot**: `escama-ap` y `escama-egress`
+  arrancan a la vez y ambas verificaban las capabilities creando la misma
+  interfaz dummy `escama-verify`; la que perdía el `ip link add` recibía
+  `EEXIST` y lo interpretaba como "las capabilities no sobreviven", fallando
+  el primer arranque hasta el reintento de systemd. Ahora la dummy es única
+  por proceso (`escv<PID>`), y `escama-launch` exporta
+  `ESCAMA_VIA_LAUNCHER=1` para que el core invocado por systemd no repita la
+  verificación (ya trae las capabilities).
+
 ## 2.3.0 — 2026-11-17
 
 ### Agregado
