@@ -1,3 +1,14 @@
+## 2.4.2 — 2026-11-22
+
+### Corregido
+- **Tailscale nunca se elige como egress automático**: `tailscale0` se clasifica
+  como interfaz de administración (acceso remoto a OpenCode). Con
+  `EGRESS_MODE="auto"` los clientes usan la WAN y con `"vpn"` quedan en
+  fail-closed, en vez de caer en un túnel sin nodo de salida que los dejaba sin
+  internet. Si se fija explícitamente con `VPN_IFACE="tailscale0"`, escama
+  comprueba el exit node y, si no hay, falla cerrado con mensaje explícito.
+  Bump **patch**: corrige la selección de un egress que no podía dar salida.
+
 ## 2.4.1 — 2026-11-22
 
 ### Corregido

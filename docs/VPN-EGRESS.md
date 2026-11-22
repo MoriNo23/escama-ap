@@ -198,12 +198,15 @@ matter the most (MTU 1280). Notes:
   they did not coexist because NAT was pinned to the WAN. With NAT + policy
   routing toward `CloudflareWARP` they coexist fine.
 
-### Tailscale
-`tailscale0` is detected, but careful: as an exit node you need
-`tailscale up --exit-node=<node>`; without it, `tailscale0` only routes the
-tailnet and sending all client traffic there yields no internet. If you use
-Tailscale without an exit node, leave `EGRESS_MODE="wan"` or pin `VPN_IFACE`
-to another tunnel.
+### Tailscale (management only)
+`tailscale0` is a management interface: remote access to the host (for example,
+OpenCode from your phone). It is never selected automatically as egress, even
+with `EGRESS_MODE="auto"` or `"vpn"`. With `auto` the clients use the WAN; with
+`vpn` they stay fail-closed. To use it deliberately, pin
+`VPN_IFACE="tailscale0"` after configuring an exit node
+(`tailscale up --exit-node=<node>`). escama checks the exit node read-only via
+`tailscale status --json`; if there is none, it fails closed with an explicit
+message and installs no NAT toward the tunnel.
 
 ### Cleanup and reconciliation
 

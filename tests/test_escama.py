@@ -548,6 +548,55 @@ def test_resolve_egress_wan_mode_ignores_vpn(monkeypatch):
     assert escama.resolve_egress(cfg) == ("stonepi", "wan")
 
 
+def _run_tailscale_exit_node(activo):
+    import json
+    estado = {"ExitNode": {"ID": "nodo1"} if activo else None}
+
+    def fake_run(cmd, capture=True, ro=False, **_kw):
+        class R:
+            returncode = 0
+            stdout = json.dumps(estado)
+            stderr = ""
+        return R()
+    return fake_run
+
+
+def test_auto_ignora_tailscale_sin_otro_tunel(monkeypatch):
+    """tailscale0 es administración: auto debe caer a la WAN."""
+    cfg = dict(escama.DEFAULTS, EGRESS_MODE="auto", WAN_IFACE="wan1",
+               VPN_IFACE="")
+    monkeypatch.setattr(escama, "list_tunnels", lambda: ["tailscale0"])
+    monkeypatch.setattr(escama, "iface_is_up", lambda _i: True)
+    assert escama.resolve_egress(cfg) == ("wan1", "wan")
+
+
+def test_modo_vpn_con_unico_tunel_administrativo(monkeypatch):
+    cfg = dict(escama.DEFAULTS, EGRESS_MODE="vpn", WAN_IFACE="wan1",
+               VPN_IFACE="")
+    monkeypatch.setattr(escama, "list_tunnels", lambda: ["tailscale0"])
+    monkeypatch.setattr(escama, "iface_is_up", lambda _i: True)
+    assert escama.resolve_egress(cfg) == ("", "none")
+
+
+def test_pin_tailscale_sin_exit_node_falla_cerrado(monkeypatch, capsys):
+    cfg = dict(escama.DEFAULTS, EGRESS_MODE="auto", WAN_IFACE="wan1",
+               VPN_IFACE="tailscale0")
+    monkeypatch.setattr(escama, "iface_exists", lambda _i: True)
+    monkeypatch.setattr(escama, "iface_is_up", lambda _i: True)
+    monkeypatch.setattr(escama, "run", _run_tailscale_exit_node(False))
+    assert escama.resolve_egress(cfg) == ("", "none")
+    assert "exit node" in capsys.readouterr().out.lower()
+
+
+def test_pin_tailscale_con_exit_node_se_aplica(monkeypatch):
+    cfg = dict(escama.DEFAULTS, EGRESS_MODE="auto", WAN_IFACE="wan1",
+               VPN_IFACE="tailscale0")
+    monkeypatch.setattr(escama, "iface_exists", lambda _i: True)
+    monkeypatch.setattr(escama, "iface_is_up", lambda _i: True)
+    monkeypatch.setattr(escama, "run", _run_tailscale_exit_node(True))
+    assert escama.resolve_egress(cfg) == ("tailscale0", "vpn")
+
+
 def test_apply_egress_vpn_masquerades_on_tunnel_and_blocks_wan(monkeypatch, tmp_path):
     calls = []
 

@@ -194,11 +194,15 @@ el MSS clamp (MTU 1280). Notas:
   no coexistían porque el NAT estaba clavado a la WAN. Con NAT + policy routing hacia
   `CloudflareWARP` conviven bien.
 
-### Tailscale
-`tailscale0` se detecta, pero ojo: como exit node hace falta
-`tailscale up --exit-node=<node>`; si no, `tailscale0` solo rutea la tailnet y mandar
-todo el tráfico de los clientes ahí no da internet. Si usás Tailscale sin exit node,
-dejá `EGRESS_MODE="wan"` o fijá `VPN_IFACE` a otro tunnel.
+### Tailscale (solo administración)
+`tailscale0` es una interfaz de administración: acceso remoto al host (por
+ejemplo, OpenCode desde tu celular). Nunca se elige automáticamente como egress,
+ni con `EGRESS_MODE="auto"` ni con `"vpn"`. Con `auto` los clientes usan la WAN;
+con `vpn` quedan en fail-closed. Para usarlo a propósito, fijá
+`VPN_IFACE="tailscale0"` después de configurar un exit node
+(`tailscale up --exit-node=<node>`). escama comprueba el exit node solo lectura
+con `tailscale status --json`; si no hay, falla cerrado con mensaje explícito y
+no instala NAT hacia el túnel.
 
 ### Limpieza y reconciliación
 

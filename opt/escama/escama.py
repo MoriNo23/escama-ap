@@ -15,6 +15,7 @@ Uso: sudo escama.py {start|stop|restart|status|reconnect|genconfig}
 import os
 import sys
 import syslog
+import json
 import subprocess
 import time
 import re
@@ -194,6 +195,9 @@ VPN_KNOWN = [
 
 # Interfaces that are never a valid egress even if they look like a tunnel.
 VPN_BLACKLIST = ("ipv6leakintrf0", "pvpnksintrf0", "lo")
+# Remote-management interfaces: real tunnels, but they are the control plane
+# (e.g. Tailscale for remote OpenCode), not an automatic egress for AP clients.
+VPN_MANAGEMENT = ("tailscale0",)
 
 # Defaults (overriden by env)
 DEFAULTS = {
@@ -619,15 +623,35 @@ def list_tunnels() -> list:
     return tunnels
 
 
+def _tailscale_exit_node_activo() -> bool:
+    """Tailscale tiene un nodo de salida activo? Solo lectura, sin sudo."""
+    p = run(["tailscale", "status", "--json"], capture=True, ro=True)
+    if not p or p.returncode != 0:
+        return False
+    try:
+        return bool(json.loads(p.stdout or "").get("ExitNode"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def detect_vpn_iface(cfg: dict) -> str:
     """Return the VPN iface to use as egress, or "" if none is usable.
 
     Order: explicit VPN_IFACE from env > known names that are up > any tunnel up.
+    Management interfaces are never auto-selected.
     """
     forced = (cfg.get("VPN_IFACE") or "").strip()
     if forced:
-        return forced if iface_is_up(forced) else ""
+        if not iface_is_up(forced):
+            return ""
+        if forced in VPN_MANAGEMENT and not _tailscale_exit_node_activo():
+            log("WARN: tailscale0 fijado como egress pero no hay exit node "
+                "activo; clientes sin internet (fail-closed)")
+            return ""
+        return forced
     for iface in list_tunnels():
+        if iface in VPN_MANAGEMENT:
+            continue
         if iface_is_up(iface):
             return iface
     return ""
@@ -672,7 +696,11 @@ def resolve_egress(cfg: dict) -> tuple:
     wan = cfg.get("WAN_IFACE") or ""
     if mode == "wan":
         return (wan, "wan") if wan else ("", "none")
+    forzado = (cfg.get("VPN_IFACE") or "").strip()
     vpn = detect_vpn_iface(cfg)
+    # Un pin explicito que no se pudo usar NO degrada a WAN en silencio.
+    if forzado and not vpn:
+        return ("", "none")
     if mode == "vpn":
         # fail-closed: sin tunnel no hay internet para los clientes
         return (vpn, "vpn") if vpn else ("", "none")
